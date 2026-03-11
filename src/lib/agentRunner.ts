@@ -131,7 +131,7 @@ async function processTask(todo: { id: string; text: string }) {
   ).run(sessionId, todo.id);
   notifyChange();
 
-  const toolCallsLog: { tool: string; input: unknown; result: string }[] = [];
+  const toolCallsLog: { tool: string; input: unknown; result: string; timestamp: string }[] = [];
   const allMessages: Anthropic.MessageParam[] = [];
 
   try {
@@ -144,9 +144,10 @@ You are an autonomous AI agent. You've been assigned a specific task to complete
 RULES:
 1. First, write a 1-2 sentence PLAN of what you'll do
 2. Execute using tools
-3. End with a SUMMARY of what you accomplished
+3. End with a clear **SUMMARY:** section describing what you accomplished or found
 4. If you CANNOT complete the task, clearly state WHY
 5. Be efficient — minimum tool calls needed
+6. NEVER use the complete_todo tool. The user will review your work and decide when to mark it done.
 
 TASK: "${todo.text}"`;
 
@@ -193,6 +194,7 @@ TASK: "${todo.text}"`;
             tool: block.name,
             input: block.input,
             result: result.length > 500 ? result.slice(0, 500) + "..." : result,
+            timestamp: new Date().toISOString(),
           });
 
           toolResults.push({
@@ -213,6 +215,19 @@ TASK: "${todo.text}"`;
         { role: "assistant" as const, content: response.content },
         { role: "user" as const, content: toolResults },
       ];
+
+      // Update session in-progress so the UI can show real-time data
+      db.prepare(
+        `UPDATE agent_sessions SET
+          tool_calls = ?,
+          messages = ?
+        WHERE id = ?`
+      ).run(
+        JSON.stringify(toolCallsLog),
+        JSON.stringify(currentMessages),
+        sessionId
+      );
+      notifyChange();
     }
 
     // Extract summary from final text
@@ -255,15 +270,15 @@ TASK: "${todo.text}"`;
 }
 
 function extractSummary(text: string): string {
-  // Try to find a SUMMARY section
-  const summaryMatch = text.match(/SUMMARY[:\s]*(.+?)(?:\n\n|$)/si);
-  if (summaryMatch) return summaryMatch[1].trim();
+  // Try to find a **SUMMARY:** or SUMMARY: section — capture everything after it
+  const summaryMatch = text.match(/\*{0,2}SUMMARY[:\s*]*\*{0,2}\s*([\s\S]+?)$/i);
+  if (summaryMatch) return summaryMatch[1].trim().slice(0, 2000);
 
   // Otherwise use the last paragraph as summary
   const paragraphs = text.split("\n\n").filter(p => p.trim());
-  if (paragraphs.length > 0) return paragraphs[paragraphs.length - 1].trim();
+  if (paragraphs.length > 0) return paragraphs[paragraphs.length - 1].trim().slice(0, 2000);
 
-  return text.trim().slice(0, 500);
+  return text.trim().slice(0, 2000);
 }
 
 function recoverStaleSessions() {

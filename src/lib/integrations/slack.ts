@@ -105,6 +105,50 @@ export async function listUserChannels(userToken: string): Promise<SlackChannel[
 }
 
 /**
+ * Discover channels with unread messages using conversations.info for each channel.
+ * Returns channel IDs that have unreads from other users.
+ */
+async function discoverUnreadChannels(
+  client: WebClient,
+  userId: string,
+  channelIds: string[],
+  onProgress?: (status: string) => void,
+): Promise<{ id: string; name: string; lastRead: string }[]> {
+  const unreadChannels: { id: string; name: string; lastRead: string }[] = [];
+
+  // Batch conversations.info calls (10 at a time to respect rate limits)
+  for (let i = 0; i < channelIds.length; i += 10) {
+    const batch = channelIds.slice(i, i + 10);
+    if (i > 0 && i % 50 === 0) {
+      onProgress?.(`checking unreads ${i}/${channelIds.length}`);
+    }
+    const results = await Promise.all(
+      batch.map(async (chId) => {
+        try {
+          const info = await client.conversations.info({ channel: chId });
+          const c = info.channel as Record<string, unknown>;
+          const unreadCount = (c?.unread_count_display as number) ?? (c?.unread_count as number) ?? 0;
+          if (unreadCount > 0) {
+            const name = (c?.name as string) ?? chId;
+            const lastRead = (c?.last_read as string) ?? "0";
+            channelNameCache.set(chId, name);
+            return { id: chId, name, lastRead };
+          }
+        } catch {
+          // skip channels we can't access
+        }
+        return null;
+      })
+    );
+    for (const r of results) {
+      if (r) unreadChannels.push(r);
+    }
+  }
+
+  return unreadChannels;
+}
+
+/**
  * Fetch messages from specific watched channels + all DMs for the last 24h.
  * Includes the user's own messages so DM conversations show both sides.
  */
@@ -168,7 +212,7 @@ export async function fetchChannelMessages(
     }
   }
 
-  // Full sync: discover all DMs
+  // Full sync: discover all DMs and channels with unreads
   if (!isQuickSync) {
     onProgress?.("finding DMs");
     const allDms: { id: string; userId: string; updated: number }[] = [];
@@ -198,6 +242,57 @@ export async function fetchChannelMessages(
 
     for (const dm of activeDms) {
       channelsToFetch.push({ id: dm.id, name: `DM: ${getUserName(dm.userId)}`, isDm: true, lastRead: "0" });
+    }
+
+    // Discover ALL channels with unread messages (not just watched ones)
+    onProgress?.("checking for unread channels");
+    const allChannelIds: string[] = [];
+    let chCursor: string | undefined;
+    do {
+      const res = await client.users.conversations({
+        types: "public_channel,private_channel",
+        exclude_archived: true,
+        limit: 200,
+        cursor: chCursor,
+      });
+      for (const ch of res.channels ?? []) {
+        if (ch.id) allChannelIds.push(ch.id);
+      }
+      chCursor = res.response_metadata?.next_cursor || undefined;
+    } while (chCursor);
+
+    // Filter out channels we're already fetching
+    const alreadyFetching = new Set(channelsToFetch.map(c => c.id));
+    const channelsToCheck = allChannelIds.filter(id => !alreadyFetching.has(id));
+    console.log(`[slack] Checking ${channelsToCheck.length} channels for unreads (${alreadyFetching.size} already queued)`);
+
+    if (channelsToCheck.length > 0) {
+      const unreadChannels = await discoverUnreadChannels(client, userId, channelsToCheck, onProgress);
+      console.log(`[slack] Found ${unreadChannels.length} additional channels with unread messages`);
+      for (const ch of unreadChannels) {
+        channelsToFetch.push({ id: ch.id, name: ch.name, isDm: false, lastRead: ch.lastRead });
+      }
+    }
+
+    // Also check DMs for unreads — use conversations.info to get last_read
+    const dmIdsToCheck = channelsToFetch.filter(c => c.isDm).map(c => c.id);
+    if (dmIdsToCheck.length > 0) {
+      onProgress?.("checking DM unreads");
+      for (let i = 0; i < dmIdsToCheck.length; i += 10) {
+        const batch = dmIdsToCheck.slice(i, i + 10);
+        await Promise.all(
+          batch.map(async (chId) => {
+            try {
+              const info = await client.conversations.info({ channel: chId });
+              const c = info.channel as Record<string, unknown>;
+              const lastRead = (c?.last_read as string) ?? "0";
+              // Update the lastRead for this DM in our fetch list
+              const entry = channelsToFetch.find(ch => ch.id === chId);
+              if (entry) entry.lastRead = lastRead;
+            } catch { /* skip */ }
+          })
+        );
+      }
     }
   }
 
@@ -314,7 +409,8 @@ export async function fetchChannelMessages(
           });
           const msgs: RawMsg[] = [];
           for (const msg of res.messages ?? []) {
-            if (msg.subtype && msg.subtype !== "thread_broadcast") continue;
+            const allowedSubtypes = new Set(["thread_broadcast", "file_share", "me_message"]);
+            if (msg.subtype && !allowedSubtypes.has(msg.subtype)) continue;
             // Extract file attachments (images, etc.)
             const rawMsg = msg as Record<string, unknown>;
             const rawFiles = rawMsg.files as Array<Record<string, unknown>> | undefined;
@@ -407,10 +503,10 @@ export async function fetchChannelMessages(
     }
   } catch { /* non-fatal */ }
 
-  // Find channels that need attention:
-  // 1. Has unread messages from someone else, OR
-  // 2. Last message in the channel is from someone else (they're waiting on you)
+  // Keep messages that are unread OR from watched channels OR from channels
+  // where the last message is from someone else (waiting on you)
   const channelsToKeep = new Set<string>();
+  const watchedSet = new Set(watchedChannelIds ?? []);
 
   // Group messages by channel to find the latest per channel
   const msgsByChannel = new Map<string, SlackMessage[]>();
@@ -420,19 +516,14 @@ export async function fetchChannelMessages(
   }
 
   for (const [channelId, msgs] of msgsByChannel) {
-    // Sort by timestamp desc to find the latest
     msgs.sort((a, b) => parseFloat(b.timestamp) - parseFloat(a.timestamp));
     const latest = msgs[0];
-
-    // Only keep if the LAST message in the conversation is from someone else
-    // (meaning they're waiting on you). If you replied last, you've attended to it.
-    if (latest && latest.sender !== userId) {
+    // Keep if: has any unread from others, or last message is from someone else
+    const hasUnreadFromOthers = msgs.some(m => m.isUnread && m.sender !== userId);
+    if (hasUnreadFromOthers || (latest && latest.sender !== userId)) {
       channelsToKeep.add(channelId);
     }
   }
-
-  // For watched channels, always keep them
-  const watchedSet = new Set(watchedChannelIds ?? []);
 
   const filteredMessages = allMessages.filter((m) => {
     if (watchedSet.has(m.channel)) return true;
@@ -555,6 +646,52 @@ export async function fetchChannelMessages(
 
   filteredMessages.sort((a, b) => parseFloat(b.timestamp) - parseFloat(a.timestamp));
   return filteredMessages;
+}
+
+/**
+ * Run a full Slack sync on server startup to backfill any messages missed while offline.
+ * Uses profile + watched channels from the DB.
+ */
+export async function startupSlackSync(): Promise<void> {
+  try {
+    const { getDb, getSetting } = await import("@/lib/db");
+    const { getProfile, upsertItem, removeStaleItems } = await import("@/lib/items");
+    const { notifyChange } = await import("@/lib/changeNotifier");
+
+    const profile = getProfile();
+    if (!profile?.slack_token || !profile?.slack_user_id) {
+      console.log("[slack-startup] No Slack credentials configured, skipping startup sync");
+      return;
+    }
+
+    const watchedRaw = getSetting("slack:watchedChannels");
+    const watchedChannels: string[] = watchedRaw ? JSON.parse(watchedRaw) : [];
+    console.log(`[slack-startup] Starting sync with ${watchedChannels.length} watched channels`);
+
+    const messages = await fetchChannelMessages(
+      profile.slack_token,
+      profile.slack_user_id,
+      (status) => console.log(`[slack-startup] ${status}`),
+      watchedChannels.length > 0 ? watchedChannels : undefined,
+    );
+
+    const sourceIds: string[] = [];
+    for (const msg of messages) {
+      sourceIds.push(msg.id);
+      upsertItem({
+        source: "slack",
+        source_id: msg.id,
+        title: `#${msg.channelName} — ${msg.senderName}: ${msg.text.substring(0, 100)}`,
+        url: msg.permalink,
+        raw_data: JSON.stringify(msg),
+      });
+    }
+    removeStaleItems("slack", sourceIds);
+    notifyChange();
+    console.log(`[slack-startup] Sync complete: ${messages.length} messages`);
+  } catch (e) {
+    console.error("[slack-startup] Sync failed:", e instanceof Error ? e.message : e);
+  }
 }
 
 export async function sendReply(

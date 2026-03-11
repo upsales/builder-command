@@ -5,5 +5,9 @@ export async function register() {
     startSlackSocket();
     const { startAgentRunner } = await import("@/lib/agentRunner");
     startAgentRunner();
+
+    // Run Slack sync on startup to backfill any messages missed while offline
+    const { startupSlackSync } = await import("@/lib/integrations/slack");
+    startupSlackSync(); // fire and forget — don't block server startup
   }
 }

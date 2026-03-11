@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from "react";
-import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, AlertTriangle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, LayoutDashboard, Flame, Zap, Trophy, Plus, Trash2, Square, CheckSquare, Play, Pause } from "lucide-react";
+import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, LayoutDashboard, Flame, Zap, Trophy, Plus, Trash2, Square, CheckSquare, Play, Pause } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 function useLocalStorage<T>(key: string, defaultValue: T): [T, (v: T | ((prev: T) => T)) => void] {
@@ -297,9 +297,66 @@ interface CodeContext {
 
 export interface ChatPanelHandle {
   injectPrompt: (text: string, context?: CodeContext, displayText?: string) => void;
+  openAgentSession: (sessionId: string) => void;
 }
 
 const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
+  const [chatTab, setChatTab] = useState<"chat" | "agent">("chat");
+  const [agentSessionId, setAgentSessionId] = useState<string | null>(null);
+  const [agentSessionData, setAgentSessionData] = useState<{ id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; messages?: string; tool_calls?: string; started_at?: string; completed_at?: string; todoText?: string } | null>(null);
+  const [agentSessions, setAgentSessions] = useState<{ id: string; todo_id: string; status: string; summary?: string; started_at?: string; completed_at?: string }[]>([]);
+  const [loadingAgentSession, setLoadingAgentSession] = useState(false);
+
+  // Poll for agent sessions list
+  useEffect(() => {
+    if (chatTab !== "agent") return;
+    const load = () => fetch("/api/agent/sessions").then(r => r.json()).then(setAgentSessions).catch(() => {});
+    load();
+    const interval = setInterval(load, 3000);
+    return () => clearInterval(interval);
+  }, [chatTab]);
+
+  const loadAgentSession = useCallback(async (sessionId: string) => {
+    setLoadingAgentSession(true);
+    setAgentSessionId(sessionId);
+    try {
+      const res = await fetch(`/api/agent/sessions?session_id=${sessionId}`);
+      const data = await res.json();
+      if (data) {
+        const todosRes = await fetch("/api/todos?mode=queue");
+        const todos = await todosRes.json();
+        const todo = todos.find((t: { id: string }) => t.id === data.todo_id);
+        setAgentSessionData({ ...data, todoText: todo?.text });
+      }
+    } finally {
+      setLoadingAgentSession(false);
+    }
+  }, []);
+
+  // Poll active session for real-time updates
+  useEffect(() => {
+    if (!agentSessionId || agentSessionData?.status !== "running") return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/agent/sessions?session_id=${agentSessionId}`);
+        const data = await res.json();
+        if (data) {
+          setAgentSessionData(prev => ({ ...data, todoText: prev?.todoText }));
+          // Stop polling if done
+          if (data.status !== "running") clearInterval(interval);
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [agentSessionId, agentSessionData?.status]);
+
+  // Auto-open a running session when switching to agent tab
+  useEffect(() => {
+    if (chatTab !== "agent" || agentSessionId) return;
+    const running = agentSessions.find(s => s.status === "running");
+    if (running) loadAgentSession(running.id);
+  }, [chatTab, agentSessions, agentSessionId, loadAgentSession]);
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -420,19 +477,22 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
   useImperativeHandle(ref, () => ({
     injectPrompt: (text: string, context?: CodeContext, displayText?: string) => {
       if (streaming) return;
+      setChatTab("chat");
       if (context) {
         setCodeContext(context);
       }
-      // Show context as a user message + canned Claude ack, then let user type their question
       const userMsg: ChatMessage = { role: "user", content: displayText ?? text, timestamp: Date.now() };
       const asstMsg: ChatMessage = { role: "assistant", content: "Got it. What would you like to know?", timestamp: Date.now() };
-      // Store the full context text in a ref so the next user message includes it
       injectedContextRef.current = text;
       setMessages((prev) => [...prev, userMsg, asstMsg]);
       setInput("");
       setTimeout(() => inputRef.current?.focus(), 100);
     },
-  }), [streaming]);
+    openAgentSession: (sessionId: string) => {
+      setChatTab("agent");
+      loadAgentSession(sessionId);
+    },
+  }), [streaming, loadAgentSession]);
 
   const handleSend = async () => {
     const text = input.trim();
@@ -463,108 +523,262 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Chat header */}
-      <div className="px-4 py-3 border-b border-border flex items-center gap-2">
-        <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-accent to-violet-500 flex items-center justify-center">
-          <Sparkles size={12} className="text-white" />
-        </div>
-        <span className="text-sm font-semibold">Claude</span>
-        <span className="text-[10px] text-muted bg-card-hover px-1.5 py-0.5 rounded">context-aware</span>
-      </div>
-
-      {/* Messages */}
-      <div ref={messagesContainerRef} onScroll={checkIfNearBottom} className="flex-1 overflow-y-auto px-4 py-4 space-y-4 min-h-0">
-        {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-center space-y-3">
-            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-accent/20 to-violet-500/20 flex items-center justify-center">
-              <Bot size={24} className="text-accent" />
-            </div>
-            <div>
-              <p className="text-sm font-medium">Work assistant</p>
-              <p className="text-xs text-muted mt-1 max-w-[240px]">I can see all your items. Ask me to prioritize, summarize, draft replies, or help you plan your day.</p>
-            </div>
-            <div className="flex flex-wrap gap-1.5 justify-center mt-2">
-              {["What should I focus on?", "Summarize my PRs", "Any urgent slack?", "Plan my day"].map((q) => (
-                <button
-                  key={q}
-                  onClick={() => { setInput(q); inputRef.current?.focus(); }}
-                  className="text-[11px] px-2.5 py-1.5 rounded-lg bg-card border border-border hover:bg-card-hover hover:border-accent/30 transition-all text-muted hover:text-foreground"
-                >
-                  {q}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-        {messages.map((msg, i) => (
-          <div key={i} className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}>
-            <div className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${
-              msg.role === "user"
-                ? "bg-accent text-white rounded-br-md whitespace-pre-wrap"
-                : "bg-card border border-border rounded-bl-md chat-markdown"
-            }`}>
-              {msg.role === "assistant" ? <ReactMarkdown>{msg.content}</ReactMarkdown> : msg.content}
-            </div>
-            {msg.timestamp && (
-              <span className="text-[9px] text-muted/40 mt-0.5 px-1">
-                {new Date(msg.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}
-              </span>
-            )}
-          </div>
-        ))}
-        {/* Streaming message rendered separately to avoid re-rendering the whole list */}
-        {streaming && streamingText && (
-          <div className="flex justify-start">
-            <div className="max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed bg-card border border-border rounded-bl-md chat-markdown">
-              <ReactMarkdown>{streamingText}</ReactMarkdown>
-              <span className="inline-block w-1.5 h-4 bg-accent/60 ml-0.5 animate-pulse rounded-sm" />
-            </div>
-          </div>
-        )}
-        {streaming && !streamingText && (
-          <div className="flex justify-start">
-            <div className="max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm bg-card border border-border rounded-bl-md">
-              <span className="inline-block w-1.5 h-4 bg-accent/60 animate-pulse rounded-sm" />
-            </div>
-          </div>
-        )}
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Input */}
-      <div className="p-3 border-t border-border">
-        {codeContext && (
-          <div className="flex items-center gap-2 mb-2 px-1">
-            <span className="text-[10px] bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded-full flex items-center gap-1">
-              <GitPullRequest size={9} />
-              {codeContext.repo}{codeContext.prNumber ? `#${codeContext.prNumber}` : ""} — Agent SDK
-            </span>
-            <span className="text-[9px] text-muted/40">Claude can explore the full repo</span>
-            <button onClick={() => { setCodeContext(null); codeSessionIdRef.current = null; }} className="text-muted/40 hover:text-muted text-[10px]">
-              <X size={10} />
-            </button>
-          </div>
-        )}
-        <div className="flex items-end gap-2 bg-card border border-border rounded-xl px-3 py-2 focus-within:border-accent/50 transition-colors">
-          <textarea
-            ref={inputRef}
-            id="chat-input"
-            value={input}
-            onChange={(e) => { setInput(e.target.value); autoResize(e.target); }}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask about your work..."
-            rows={1}
-            className="flex-1 bg-transparent text-sm resize-none focus:outline-none placeholder:text-muted/50 max-h-[120px]"
-          />
+      {/* Chat header with tabs */}
+      <div className="px-4 py-2.5 border-b border-border flex items-center gap-3">
+        <div className="flex items-center gap-0.5 border border-border rounded-lg overflow-hidden">
           <button
-            onClick={handleSend}
-            disabled={!input.trim() || streaming}
-            className="w-7 h-7 rounded-lg bg-accent text-white flex items-center justify-center hover:bg-accent-hover transition-colors disabled:opacity-30 shrink-0"
+            onClick={() => setChatTab("chat")}
+            className={`px-2.5 py-1 text-[11px] font-medium transition-all cursor-pointer flex items-center gap-1 ${
+              chatTab === "chat" ? "bg-accent/20 text-accent" : "text-muted hover:text-foreground hover:bg-card-hover"
+            }`}
           >
-            <ArrowUp size={14} />
+            <Sparkles size={10} /> Chat
+          </button>
+          <button
+            onClick={() => setChatTab("agent")}
+            className={`px-2.5 py-1 text-[11px] font-medium transition-all cursor-pointer flex items-center gap-1 ${
+              chatTab === "agent" ? "bg-purple-500/20 text-purple-400" : "text-muted hover:text-foreground hover:bg-card-hover"
+            }`}
+          >
+            <Bot size={10} /> Agent
           </button>
         </div>
+        {chatTab === "chat" && (
+          <span className="text-[10px] text-muted bg-card-hover px-1.5 py-0.5 rounded">context-aware</span>
+        )}
       </div>
+
+      {/* Chat tab */}
+      {chatTab === "chat" && (<>
+        <div ref={messagesContainerRef} onScroll={checkIfNearBottom} className="flex-1 overflow-y-auto px-4 py-4 space-y-4 min-h-0">
+          {messages.length === 0 && (
+            <div className="flex flex-col items-center justify-center h-full text-center space-y-3">
+              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-accent/20 to-violet-500/20 flex items-center justify-center">
+                <Bot size={24} className="text-accent" />
+              </div>
+              <div>
+                <p className="text-sm font-medium">Work assistant</p>
+                <p className="text-xs text-muted mt-1 max-w-[240px]">I can see all your items. Ask me to prioritize, summarize, draft replies, or help you plan your day.</p>
+              </div>
+              <div className="flex flex-wrap gap-1.5 justify-center mt-2">
+                {["What should I focus on?", "Summarize my PRs", "Any urgent slack?", "Plan my day"].map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => { setInput(q); inputRef.current?.focus(); }}
+                    className="text-[11px] px-2.5 py-1.5 rounded-lg bg-card border border-border hover:bg-card-hover hover:border-accent/30 transition-all text-muted hover:text-foreground"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {messages.map((msg, i) => (
+            <div key={i} className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}>
+              <div className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${
+                msg.role === "user"
+                  ? "bg-accent text-white rounded-br-md whitespace-pre-wrap"
+                  : "bg-card border border-border rounded-bl-md chat-markdown"
+              }`}>
+                {msg.role === "assistant" ? <ReactMarkdown>{msg.content}</ReactMarkdown> : msg.content}
+              </div>
+              {msg.timestamp && (
+                <span className="text-[9px] text-muted/40 mt-0.5 px-1">
+                  {new Date(msg.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}
+                </span>
+              )}
+            </div>
+          ))}
+          {streaming && streamingText && (
+            <div className="flex justify-start">
+              <div className="max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed bg-card border border-border rounded-bl-md chat-markdown">
+                <ReactMarkdown>{streamingText}</ReactMarkdown>
+                <span className="inline-block w-1.5 h-4 bg-accent/60 ml-0.5 animate-pulse rounded-sm" />
+              </div>
+            </div>
+          )}
+          {streaming && !streamingText && (
+            <div className="flex justify-start">
+              <div className="max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm bg-card border border-border rounded-bl-md">
+                <span className="inline-block w-1.5 h-4 bg-accent/60 animate-pulse rounded-sm" />
+              </div>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+        <div className="p-3 border-t border-border">
+          {codeContext && (
+            <div className="flex items-center gap-2 mb-2 px-1">
+              <span className="text-[10px] bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded-full flex items-center gap-1">
+                <GitPullRequest size={9} />
+                {codeContext.repo}{codeContext.prNumber ? `#${codeContext.prNumber}` : ""} — Agent SDK
+              </span>
+              <span className="text-[9px] text-muted/40">Claude can explore the full repo</span>
+              <button onClick={() => { setCodeContext(null); codeSessionIdRef.current = null; }} className="text-muted/40 hover:text-muted text-[10px]">
+                <X size={10} />
+              </button>
+            </div>
+          )}
+          <div className="flex items-end gap-2 bg-card border border-border rounded-xl px-3 py-2 focus-within:border-accent/50 transition-colors">
+            <textarea
+              ref={inputRef}
+              id="chat-input"
+              value={input}
+              onChange={(e) => { setInput(e.target.value); autoResize(e.target); }}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask about your work..."
+              rows={1}
+              className="flex-1 bg-transparent text-sm resize-none focus:outline-none placeholder:text-muted/50 max-h-[120px]"
+            />
+            <button
+              onClick={handleSend}
+              disabled={!input.trim() || streaming}
+              className="w-7 h-7 rounded-lg bg-accent text-white flex items-center justify-center hover:bg-accent-hover transition-colors disabled:opacity-30 shrink-0"
+            >
+              <ArrowUp size={14} />
+            </button>
+          </div>
+        </div>
+      </>)}
+
+      {/* Agent tab */}
+      {chatTab === "agent" && (
+        <div className="flex-1 overflow-y-auto min-h-0">
+          {/* Session detail view */}
+          {agentSessionId && agentSessionData ? (
+            <div className="flex flex-col h-full">
+              {/* Session header */}
+              <div className="px-4 py-2.5 border-b border-border/50 flex items-center gap-2">
+                <button onClick={() => { setAgentSessionId(null); setAgentSessionData(null); }} className="text-muted hover:text-foreground transition-colors">
+                  <ChevronLeft size={14} />
+                </button>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium truncate">{agentSessionData.todoText ?? "Task"}</p>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    {agentSessionData.status === "running" && <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Loader2 size={8} className="animate-spin" /> Running</span>}
+                    {agentSessionData.status === "completed" && <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={8} /> Completed</span>}
+                    {agentSessionData.status === "failed" && <span className="text-[9px] text-red-400 flex items-center gap-0.5"><XCircle size={8} /> Failed</span>}
+                    {agentSessionData.started_at && <span className="text-[9px] text-muted/40">{new Date(agentSessionData.started_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}</span>}
+                  </div>
+                </div>
+              </div>
+              {/* Session content — tool calls and summary */}
+              <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+                {/* Summary */}
+                {agentSessionData.summary && (
+                  <div className="bg-purple-500/5 border border-purple-500/20 rounded-lg p-3">
+                    <h4 className="text-[10px] font-semibold text-purple-400 uppercase tracking-wide mb-1.5">Summary</h4>
+                    <div className="text-sm text-foreground/80 leading-relaxed chat-markdown">
+                      <ReactMarkdown>{agentSessionData.summary}</ReactMarkdown>
+                    </div>
+                  </div>
+                )}
+                {agentSessionData.failure_reason && (
+                  <div className="bg-red-500/5 border border-red-500/20 rounded-lg p-3">
+                    <h4 className="text-[10px] font-semibold text-red-400 uppercase tracking-wide mb-1.5">Failed</h4>
+                    <p className="text-sm text-red-400/80 leading-relaxed">{agentSessionData.failure_reason}</p>
+                  </div>
+                )}
+                {/* Tool calls log — collapsed by default */}
+                {agentSessionData.tool_calls && (() => {
+                  const calls = JSON.parse(agentSessionData.tool_calls);
+                  return calls.length > 0 ? (
+                    <details>
+                      <summary className="text-[10px] font-semibold text-muted uppercase tracking-wide cursor-pointer hover:text-foreground transition-colors select-none">
+                        Tool Calls ({calls.length})
+                      </summary>
+                      <div className="space-y-1.5 mt-1.5">
+                        {calls.map((tc: { tool: string; input: unknown; result: string; timestamp?: string }, i: number) => (
+                          <div key={i} className="bg-card border border-border rounded-lg p-2.5">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-[10px] font-semibold text-purple-400">{tc.tool}</span>
+                              <span className="text-[9px] text-muted/40">#{i + 1}</span>
+                              {tc.timestamp && <span className="text-[9px] text-muted/30 ml-auto">{new Date(tc.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}</span>}
+                            </div>
+                            {tc.input && (
+                              <pre className="text-[10px] text-muted/60 bg-background rounded p-1.5 overflow-x-auto mb-1 max-h-20 overflow-y-auto">{JSON.stringify(tc.input, null, 2)}</pre>
+                            )}
+                            <p className="text-[11px] text-muted/70 whitespace-pre-wrap">{tc.result}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  ) : null;
+                })()}
+                {/* Full messages */}
+                {agentSessionData.messages && (() => {
+                  try {
+                    const msgs = JSON.parse(agentSessionData.messages);
+                    const textBlocks: { role: string; text: string }[] = [];
+                    for (const msg of msgs) {
+                      if (typeof msg.content === "string") {
+                        textBlocks.push({ role: msg.role, text: msg.content });
+                      } else if (Array.isArray(msg.content)) {
+                        for (const block of msg.content) {
+                          if (block.type === "text") textBlocks.push({ role: msg.role, text: block.text });
+                        }
+                      }
+                    }
+                    return textBlocks.length > 0 ? (
+                      <div>
+                        <h4 className="text-[10px] font-semibold text-muted uppercase tracking-wide mb-1.5">Conversation</h4>
+                        <div className="space-y-2">
+                          {textBlocks.map((tb, i) => (
+                            <div key={i} className={`rounded-lg px-3 py-2 text-sm leading-relaxed ${tb.role === "user" ? "bg-accent/10 text-foreground/80" : "bg-card border border-border chat-markdown"}`}>
+                              <span className="text-[9px] font-semibold text-muted/50 uppercase block mb-0.5">{tb.role === "user" ? "Task" : "Agent"}</span>
+                              <ReactMarkdown>{tb.text}</ReactMarkdown>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null;
+                  } catch { return null; }
+                })()}
+              </div>
+            </div>
+          ) : loadingAgentSession ? (
+            <div className="flex items-center justify-center h-full text-muted">
+              <Loader2 size={20} className="animate-spin" />
+            </div>
+          ) : (
+            /* Session list */
+            <div className="px-4 py-3 space-y-2">
+              {agentSessions.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center space-y-3">
+                  <div className="w-12 h-12 rounded-2xl bg-purple-500/10 flex items-center justify-center">
+                    <Bot size={24} className="text-purple-400" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium">Agent Sessions</p>
+                    <p className="text-xs text-muted mt-1 max-w-[240px]">Toggle the robot icon on any task to have the AI agent work on it autonomously.</p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <h4 className="text-[10px] font-semibold text-muted uppercase tracking-wide">Recent Sessions</h4>
+                  {agentSessions.map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => loadAgentSession(s.id)}
+                      className="w-full text-left bg-card border border-border rounded-lg p-2.5 hover:bg-card-hover transition-colors"
+                    >
+                      <div className="flex items-center gap-2 mb-0.5">
+                        {s.status === "running" && <Loader2 size={10} className="text-purple-400 animate-spin" />}
+                        {s.status === "completed" && <CheckCircle size={10} className="text-green-400" />}
+                        {s.status === "failed" && <XCircle size={10} className="text-red-400" />}
+                        <span className="text-xs font-medium truncate">{s.summary?.slice(0, 60) ?? "Processing..."}</span>
+                      </div>
+                      <span className="text-[9px] text-muted/40">
+                        {s.started_at ? new Date(s.started_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) : ""}
+                      </span>
+                    </button>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 });
@@ -593,6 +807,7 @@ export default function Home() {
   const [loadingChannels, setLoadingChannels] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [chatCollapsed, setChatCollapsed] = useLocalStorage("ui:chatCollapsed", false);
+  const [chatWidth, setChatWidth] = useLocalStorage("ui:chatWidth", 520);
   const [githubMode, setGithubMode] = useLocalStorage<"author" | "assignee">("filter:githubMode", "author");
 
   // XP / gamification
@@ -1032,50 +1247,37 @@ export default function Home() {
         </div>
       )}
 
-      {/* Slack Socket Log — Right Drawer */}
-      {showSocketLog && (
-        <div className="fixed right-0 top-0 h-full w-[360px] bg-card border-l border-border z-50 flex flex-col shadow-2xl">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-            <span className="text-xs font-bold text-foreground flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${slackSocketRunning ? "bg-green-400 animate-pulse" : "bg-red-400"}`} />
-              Slack Socket Live Log
-            </span>
-            <button onClick={() => setShowSocketLog(false)} className="text-muted/50 hover:text-muted p-1"><X size={14} /></button>
-          </div>
-          <div className="flex-1 overflow-y-auto p-3">
-            {slackSocketLog.length === 0 ? (
-              <div className="text-[11px] text-muted/50 text-center py-8">No events yet. Waiting for Slack messages...</div>
-            ) : (
-              <div className="space-y-0.5 font-mono">
-                {slackSocketLog.map((evt, i) => (
-                  <div key={i} className="text-[10px] flex gap-2 py-0.5">
-                    <span className="text-muted/50 shrink-0">{evt.time}</span>
-                    <span className={`shrink-0 w-16 ${
-                      evt.type === "added" ? "text-green-400" :
-                      evt.type === "error" ? "text-red-400" :
-                      evt.type === "connected" ? "text-sky-400" :
-                      evt.type === "skip" || evt.type === "ignored" ? "text-muted/40" :
-                      "text-yellow-400"
-                    }`}>{evt.type}</span>
-                    <span className="text-muted/70 break-all">{evt.detail}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* ─── Main Split Layout ─── */}
       <div className="flex-1 flex min-h-0">
         {/* Left: Claude Chat */}
         {!chatCollapsed && (
-          <div className="w-[520px] shrink-0 border-r border-border bg-background">
-            <ChatPanel ref={chatRef} />
+          <div className="shrink-0 bg-background flex" style={{ width: chatWidth }}>
+            <div className="flex-1 min-w-0 border-r border-border">
+              <ChatPanel ref={chatRef} />
+            </div>
+            <div
+              className="w-1 cursor-col-resize hover:bg-accent/40 active:bg-accent/60 transition-colors shrink-0"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                const startX = e.clientX;
+                const startWidth = chatWidth;
+                const maxWidth = window.innerWidth * 0.5;
+                const onMove = (ev: MouseEvent) => {
+                  const newWidth = Math.min(maxWidth, Math.max(320, startWidth + ev.clientX - startX));
+                  setChatWidth(newWidth);
+                };
+                const onUp = () => {
+                  window.removeEventListener("mousemove", onMove);
+                  window.removeEventListener("mouseup", onUp);
+                };
+                window.addEventListener("mousemove", onMove);
+                window.addEventListener("mouseup", onUp);
+              }}
+            />
           </div>
         )}
 
-        {/* Right: Dashboard */}
+        {/* Center: Dashboard */}
         <div className="flex-1 min-w-0 overflow-y-auto">
           <div className="p-4">
             {items.length === 0 ? (
@@ -1084,10 +1286,52 @@ export default function Home() {
                 <p className="text-sm">Hit Sync to pull from your integrations</p>
               </div>
             ) : (
-              <ItemList items={items} setItems={setItems} onDismiss={onDismiss} dailyTodos={dailyTodos} xpData={xpData} onRefreshTodos={refreshTodos} onRefreshXp={refreshXp} onChatAbout={handleChatAbout} repoStatuses={repoStatuses} slackUserId={profile?.slack_user_id ?? undefined} watchedChannels={watchedChannels} availableChannels={availableChannels} onToggleWatchedChannel={toggleWatchedChannel} activeTab={activeTab} agentSessions={agentSessions} githubMode={githubMode} onSetGithubMode={setGithubMode} />
+              <ItemList items={items} setItems={setItems} onDismiss={onDismiss} dailyTodos={dailyTodos} xpData={xpData} onRefreshTodos={refreshTodos} onRefreshXp={refreshXp} onChatAbout={handleChatAbout} repoStatuses={repoStatuses} slackUserId={profile?.slack_user_id ?? undefined} watchedChannels={watchedChannels} availableChannels={availableChannels} onToggleWatchedChannel={toggleWatchedChannel} activeTab={activeTab} agentSessions={agentSessions} githubMode={githubMode} onSetGithubMode={setGithubMode} onOpenAgentSession={(sessionId) => { setChatCollapsed(false); chatRef.current?.openAgentSession(sessionId); }} />
             )}
           </div>
         </div>
+
+        {/* Right: Slack Socket Log Panel */}
+        {showSocketLog && (
+          <div className="w-[360px] shrink-0 border-l border-border bg-card flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+              <span className="text-xs font-bold text-foreground flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-full ${slackSocketRunning ? "bg-green-400 animate-pulse" : "bg-red-400"}`} />
+                Slack Socket Live Log
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => fetch("/api/slack/socket-restart", { method: "POST" })}
+                  className="text-[10px] text-accent hover:text-accent-hover px-2 py-0.5 rounded hover:bg-accent/10 transition-colors"
+                >
+                  Restart
+                </button>
+                <button onClick={() => setShowSocketLog(false)} className="text-muted/50 hover:text-muted p-1"><X size={14} /></button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3">
+              {slackSocketLog.length === 0 ? (
+                <div className="text-[11px] text-muted/50 text-center py-8">No events yet. Waiting for Slack messages...</div>
+              ) : (
+                <div className="space-y-0.5 font-mono">
+                  {slackSocketLog.map((evt, i) => (
+                    <div key={i} className="text-[10px] flex gap-2 py-0.5">
+                      <span className="text-muted/50 shrink-0">{evt.time}</span>
+                      <span className={`shrink-0 w-16 ${
+                        evt.type === "added" ? "text-green-400" :
+                        evt.type === "error" ? "text-red-400" :
+                        evt.type === "connected" ? "text-sky-400" :
+                        evt.type === "skip" || evt.type === "ignored" ? "text-muted/40" :
+                        "text-yellow-400"
+                      }`}>{evt.type}</span>
+                      <span className="text-muted/70 break-all">{evt.detail}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ─── Modals ─── */}
@@ -1625,12 +1869,13 @@ function buildAutoTodos(items: TodoItem[]): AutoTodo[] {
   return autoTodos;
 }
 
-function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTodo, agentSessions }: {
+function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTodo, agentSessions, onOpenAgentSession }: {
   todos: { id: string; text: string; done: number; date: string | null; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number }[];
   onRefresh: () => void;
   inProgressTodoId?: string | null;
   onToggleInProgressTodo?: (id: string) => void;
   agentSessions?: Record<string, { id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string }>;
+  onOpenAgentSession?: (sessionId: string) => void;
 }) {
   const [newTodo, setNewTodo] = useState("");
   const [noDate, setNoDate] = useState(false);
@@ -1923,19 +2168,29 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
               <img src={todo.image} alt="" className="h-16 rounded border border-border/50 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => window.open(todo.image!, "_blank")} />
             </div>
           )}
-          {/* Agent session details */}
+          {/* Agent session details — prominent display */}
           {agentSessions?.[todo.id] && (() => {
             const session = agentSessions[todo.id];
+            const isCompleted = session.status === "completed";
+            const isFailed = session.status === "failed";
             return (
-              <div className="ml-5 mt-0.5 mb-1 space-y-0.5">
+              <div className={`ml-5 mt-1 mb-1.5 rounded-lg p-2 ${isCompleted ? "bg-purple-500/5 border border-purple-500/15" : isFailed ? "bg-red-500/5 border border-red-500/15" : "bg-card border border-border"}`}>
                 {session.summary && (
-                  <p className="text-[10px] text-muted/70">{session.summary}</p>
+                  <p className="text-[11px] text-foreground/70 leading-relaxed whitespace-pre-wrap">{session.summary}</p>
                 )}
                 {session.failure_reason && (
-                  <p className="text-[10px] text-red-400/70">{session.failure_reason}</p>
+                  <p className="text-[11px] text-red-400/80 leading-relaxed">{session.failure_reason}</p>
                 )}
-                {session.tool_calls && (
-                  <div>
+                <div className="flex items-center gap-3 mt-1.5">
+                  {onOpenAgentSession && (
+                    <button
+                      onClick={() => onOpenAgentSession(session.id)}
+                      className="text-[10px] text-purple-400 hover:text-purple-300 transition-colors flex items-center gap-1 font-medium"
+                    >
+                      <MessageSquare size={9} /> Open in chat
+                    </button>
+                  )}
+                  {session.tool_calls && (
                     <button
                       onClick={() => setExpandedSession(expandedSession === todo.id ? null : todo.id)}
                       className="text-[9px] text-muted/40 hover:text-muted/70 transition-colors flex items-center gap-0.5"
@@ -1943,16 +2198,16 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
                       {expandedSession === todo.id ? <ChevronDown size={8} /> : <ChevronRight size={8} />}
                       {JSON.parse(session.tool_calls).length} tool calls
                     </button>
-                    {expandedSession === todo.id && (
-                      <div className="mt-0.5 space-y-0.5 pl-2 border-l border-border/30">
-                        {JSON.parse(session.tool_calls).map((tc: { tool: string; result: string }, i: number) => (
-                          <div key={i} className="text-[9px] text-muted/50">
-                            <span className="text-purple-400/60">{tc.tool}</span>
-                            <span className="text-muted/30"> — {tc.result.slice(0, 100)}{tc.result.length > 100 ? "..." : ""}</span>
-                          </div>
-                        ))}
+                  )}
+                </div>
+                {expandedSession === todo.id && session.tool_calls && (
+                  <div className="mt-1 space-y-0.5 pl-2 border-l border-border/30">
+                    {JSON.parse(session.tool_calls).map((tc: { tool: string; result: string }, i: number) => (
+                      <div key={i} className="text-[9px] text-muted/50">
+                        <span className="text-purple-400/60">{tc.tool}</span>
+                        <span className="text-muted/30"> — {tc.result.slice(0, 100)}{tc.result.length > 100 ? "..." : ""}</span>
                       </div>
-                    )}
+                    ))}
                   </div>
                 )}
               </div>
@@ -2043,7 +2298,7 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
   );
 }
 
-function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTodos, onRefreshXp, onChatAbout, repoStatuses, slackUserId, watchedChannels, availableChannels, onToggleWatchedChannel, activeTab, agentSessions, githubMode, onSetGithubMode }: {
+function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTodos, onRefreshXp, onChatAbout, repoStatuses, slackUserId, watchedChannels, availableChannels, onToggleWatchedChannel, activeTab, agentSessions, githubMode, onSetGithubMode, onOpenAgentSession }: {
   items: TodoItem[];
   setItems: React.Dispatch<React.SetStateAction<TodoItem[]>>;
   onDismiss: (item: TodoItem) => void;
@@ -2061,6 +2316,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   agentSessions: Record<string, { id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string }>;
   githubMode?: "author" | "assignee";
   onSetGithubMode?: (mode: "author" | "assignee") => void;
+  onOpenAgentSession?: (sessionId: string) => void;
 }) {
   const [hideDrafts, setHideDrafts] = useLocalStorage("filter:hideDrafts", true);
   const [hiddenStatesArr, setHiddenStatesArr] = useLocalStorage<string[]>("filter:hiddenStates", ["Done", "Canceled", "Cancelled"]);
@@ -2310,21 +2566,17 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
       {/* Calendar Timeline — always visible */}
       <CalendarTimeline items={items} onDismiss={onDismiss} hiddenCalendars={hiddenCalendars} onToggleCalendar={toggleCalendar} />
 
-      {/* Toolbar */}
-      <div className="flex items-center gap-1 sticky top-0 bg-background z-10 pb-2">
-        <div className="ml-auto">
-          <button
-            onClick={() => { setShowDismissed(!showDismissed); if (!showDismissed) loadDismissed(); }}
-            className={`px-3 py-1.5 rounded text-[10px] font-medium transition-all cursor-pointer ${
-              showDismissed ? "bg-muted/20 text-foreground" : "text-muted/40 hover:text-muted/70"
-            }`}
-          >
-            Recently Hidden
-          </button>
-        </div>
+      {/* Recently Hidden toggle + panel */}
+      <div className="flex justify-end -mt-1 mb-1">
+        <button
+          onClick={() => { setShowDismissed(!showDismissed); if (!showDismissed) loadDismissed(); }}
+          className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${
+            showDismissed ? "bg-muted/20 text-foreground" : "text-muted/30 hover:text-muted/60"
+          }`}
+        >
+          Recently Hidden
+        </button>
       </div>
-
-      {/* Recently Hidden panel */}
       {showDismissed && (
         <div className="mb-3 bg-card border border-border rounded-lg overflow-hidden">
           <div className="px-3 py-2 border-b border-border/50 flex items-center justify-between">
@@ -2529,7 +2781,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                     <CalendarCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} />
                   )}
                   {inProgressItem?.source === "slack" && (
-                    <SlackMessage item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} />
+                    <SlackMessage item={inProgressItem} onDismiss={onDismiss} />
                   )}
                   {inProgressTodo && (
                     <div className="flex items-center gap-2 px-4 py-2.5">
@@ -2544,13 +2796,74 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
             );
           })()}
 
+          {/* Pending Review — tasks where agent finished but user hasn't checked off */}
+          {(() => {
+            const pendingReview = dailyTodos.filter(t => !t.done && agentSessions[t.id] && (agentSessions[t.id].status === "completed" || agentSessions[t.id].status === "failed"));
+            if (pendingReview.length === 0) return null;
+            return (
+              <div className="space-y-1">
+                <h3 className="text-xs uppercase tracking-wide text-muted flex items-center gap-2">
+                  <span className="px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 flex items-center gap-1"><Bot size={10} /> Pending Review</span>
+                  <span className="text-[10px] text-muted/50">{pendingReview.length}</span>
+                </h3>
+                <div className="space-y-1.5">
+                  {pendingReview.map(todo => {
+                    const session = agentSessions[todo.id];
+                    const isFailed = session.status === "failed";
+                    return (
+                      <div key={todo.id} className={`border rounded-lg p-3 ${isFailed ? "bg-red-500/5 border-red-500/20" : "bg-purple-500/5 border-purple-500/20"}`}>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={async () => {
+                              await fetch("/api/todos", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: todo.id, done: true }) });
+                              onRefreshTodos(); onRefreshXp();
+                            }}
+                            className="shrink-0 text-muted/40 hover:text-green-400 transition-colors"
+                            title="Mark as done"
+                          >
+                            <Square size={14} />
+                          </button>
+                          <span className="flex-1 text-xs font-medium">{todo.text}</span>
+                          {isFailed ? (
+                            <span className="text-[9px] text-red-400 flex items-center gap-0.5"><XCircle size={9} /> Failed</span>
+                          ) : (
+                            <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={9} /> Agent done</span>
+                          )}
+                        </div>
+                        {session.summary && (
+                          <p className="mt-1.5 text-[11px] text-foreground/70 leading-relaxed ml-5">{session.summary}</p>
+                        )}
+                        {session.failure_reason && (
+                          <p className="mt-1.5 text-[11px] text-red-400/80 leading-relaxed ml-5">{session.failure_reason}</p>
+                        )}
+                        <div className="flex items-center gap-3 mt-1.5 ml-5">
+                          {onOpenAgentSession && (
+                          <button
+                            onClick={() => onOpenAgentSession(session.id)}
+                            className="text-[10px] text-purple-400 hover:text-purple-300 transition-colors flex items-center gap-1 font-medium"
+                          >
+                            <MessageSquare size={9} /> Open in chat
+                          </button>
+                          )}
+                          {session.tool_calls && (
+                            <span className="text-[9px] text-muted/40">{JSON.parse(session.tool_calls).length} tool calls</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* My Tasks section — always visible */}
           <div className="space-y-1">
             <h3 className="text-xs uppercase tracking-wide text-muted flex items-center gap-2">
               <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">My Tasks</span>
             </h3>
             <div className="bg-card border border-border rounded-lg px-3 py-2">
-              <TodoSection todos={dailyTodos} onRefresh={() => { onRefreshTodos(); onRefreshXp(); }} inProgressTodoId={inProgressTodoId} onToggleInProgressTodo={toggleInProgressTodo} agentSessions={agentSessions} />
+              <TodoSection todos={dailyTodos} onRefresh={() => { onRefreshTodos(); onRefreshXp(); }} inProgressTodoId={inProgressTodoId} onToggleInProgressTodo={toggleInProgressTodo} agentSessions={agentSessions} onOpenAgentSession={(sessionId) => { setChatCollapsed(false); chatRef.current?.openAgentSession(sessionId); }} />
             </div>
           </div>
 
@@ -2575,6 +2888,12 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                           if (r.sender !== slackUserId) { lastOtherIdx = i; break; }
                         }
                       }
+                      // Find boundary between read and unread for "New" divider
+                      let firstUnreadIdx = -1;
+                      for (let i = 0; i < channelItems.length; i++) {
+                        const r = channelItems[i].raw_data ? JSON.parse(channelItems[i].raw_data!) : {};
+                        if (r.isUnread) { firstUnreadIdx = i; break; }
+                      }
                       return channelItems.map((item, idx) => (
                         <SlackMessage
                           key={item.id}
@@ -2582,8 +2901,8 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                           onDismiss={onDismiss}
                           isLast={idx === channelItems.length - 1}
                           onDismissChannel={dismissAll}
-                          onChatAbout={chatAboutItem(item)}
                           isContext={isDm && lastOtherIdx >= 0 && idx < lastOtherIdx}
+                          showNewDivider={firstUnreadIdx > 0 && idx === firstUnreadIdx}
                         />
                       ));
                     })()}
@@ -2594,7 +2913,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
 
             return (
               <CollapsibleGroup label="Slack" icon={<MessageSquare size={10} />} count={slackItems.length} defaultOpen>
-                <div className="space-y-1">
+                <div className="space-y-1 ml-3 border-l border-border/30 pl-2">
                   {regularChannels.map(renderSlackChannel)}
                   {dmChannels.length > 0 && (
                     <div className="ml-3 border-l border-border/30 pl-2">
@@ -2613,7 +2932,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
           {/* GitHub section — grouped by repo */}
           {githubItems.length > 0 && (
             <CollapsibleGroup label="GitHub" icon={<GitPullRequest size={10} />} count={githubItems.length} defaultOpen>
-              <div className="space-y-1">
+              <div className="space-y-1 ml-3 border-l border-border/30 pl-2">
                 {Array.from(githubByRepo.entries()).map(([repo, repoItems]) => (
                   <CollapsibleGroup key={repo} label={repo} count={repoItems.length} mono defaultOpen>
                     {repoItems.map((item) => (
@@ -2641,13 +2960,15 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                     </button>
                   ))}
                 </div>
-                {Array.from(linearGrouped.entries()).map(([group, groupItems]) => (
-                  <CollapsibleGroup key={group} label={group} icon={<CircleDot size={10} />} count={groupItems.length} defaultOpen>
-                    {groupItems.map((item) => (
-                      <LinearCard key={item.id} item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} />
-                    ))}
-                  </CollapsibleGroup>
-                ))}
+                <div className="ml-3 border-l border-border/30 pl-2 space-y-1">
+                  {Array.from(linearGrouped.entries()).map(([group, groupItems]) => (
+                    <CollapsibleGroup key={group} label={group} icon={<CircleDot size={10} />} count={groupItems.length} defaultOpen>
+                      {groupItems.map((item) => (
+                        <LinearCard key={item.id} item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} />
+                      ))}
+                    </CollapsibleGroup>
+                  ))}
+                </div>
               </div>
             </CollapsibleGroup>
           )}
@@ -3768,8 +4089,8 @@ function formatTime(ts: string) {
   return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${time}`;
 }
 
-function SlackMessage({ item, onDismiss, isLast, onDismissChannel, onChatAbout, isContext }: {
-  item: TodoItem; onDismiss: (item: TodoItem) => void; isLast?: boolean; onDismissChannel?: () => void; onChatAbout?: (prompt: string) => void; isContext?: boolean;
+function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, showNewDivider }: {
+  item: TodoItem; onDismiss: (item: TodoItem) => void; isLast?: boolean; onDismissChannel?: () => void; isContext?: boolean; showNewDivider?: boolean;
 }) {
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   const [showThread, setShowThread] = useState(false);
@@ -3865,12 +4186,20 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, onChatAbout, 
   const isUnread = isContext ? false : raw.isUnread === true;
 
   return (
-    <div className={`px-4 py-2.5 hover:bg-card-hover transition-all duration-300 group ${fading ? "opacity-0 max-h-0 py-0 overflow-hidden" : ""} ${isUnread ? "border-l-2 border-l-emerald-500/60" : "opacity-50 border-l-2 border-l-transparent"}`}>
+    <>
+    {showNewDivider && (
+      <div className="flex items-center gap-2 px-4 py-1">
+        <div className="flex-1 h-px bg-red-500/50" />
+        <span className="text-[10px] font-semibold text-red-400 uppercase tracking-wider">New</span>
+        <div className="flex-1 h-px bg-red-500/50" />
+      </div>
+    )}
+    <div className={`px-4 py-2.5 hover:bg-card-hover transition-all duration-300 group ${fading ? "opacity-0 max-h-0 py-0 overflow-hidden" : ""}`}>
       {/* Main message */}
       <div className="flex items-start gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className={`text-sm font-semibold ${isUnread ? "text-foreground" : "text-muted"}`}>{raw.senderName ?? raw.sender}</span>
+            <span className="text-sm font-semibold text-foreground">{raw.senderName ?? raw.sender}</span>
             {raw.isThreadReply && (
               <span className="text-[10px] text-accent/70 bg-accent/10 px-1.5 py-0.5 rounded">in thread</span>
             )}
@@ -3922,7 +4251,7 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, onChatAbout, 
               </button>
             </div>
           </div>
-          <p className={`text-sm whitespace-pre-wrap leading-relaxed mt-0.5 ${isUnread ? "text-foreground/80" : "text-muted/60"}`}><SlackText text={raw.text ?? ""} /></p>
+          <p className="text-sm whitespace-pre-wrap leading-relaxed mt-0.5 text-foreground/80"><SlackText text={raw.text ?? ""} /></p>
           {raw.files && raw.files.length > 0 && (
             <div className="flex flex-wrap gap-2 mt-1.5">
               {raw.files.map((f: { name: string; mimetype: string; url: string; thumb?: string }, idx: number) => {
@@ -3951,11 +4280,6 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, onChatAbout, 
         </div>
         {/* Right actions: snooze, link, dismiss */}
         <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-          {onChatAbout && (
-            <button onClick={() => onChatAbout(`I got this Slack message and need help with it:\n\nFrom: ${raw.senderName ?? raw.sender}\nChannel: ${raw.channelName ?? "unknown"}\nMessage: ${raw.text ?? ""}\n${replies.length > 0 ? `\nThread (${replies.length} replies):\n${replies.slice(-5).map((r: { senderName: string; text: string }) => `- ${r.senderName}: ${r.text}`).join("\n")}` : ""}\n\nHelp me understand this and draft a good response.`)} className="cursor-pointer text-violet-400/50 hover:text-violet-400 transition-colors p-1" title="Chat about this">
-              <Bot size={12} />
-            </button>
-          )}
           <SnoozeButton source={item.source} sourceId={item.source_id} onDone={() => fadeAndDismiss(() => onDismiss(item))} />
           {item.url && (
             <a href={item.url} target="_blank" rel="noopener noreferrer" className="cursor-pointer text-accent/50 hover:text-accent transition-colors p-1">
@@ -4093,6 +4417,7 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, onChatAbout, 
         </div>
       )}
     </div>
+    </>
   );
 }
 

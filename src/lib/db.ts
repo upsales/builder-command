@@ -21,6 +21,17 @@ export function getDb(): Database.Database {
   return db;
 }
 
+export function getSetting(key: string): string | null {
+  const db = getDb();
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setSetting(key: string, value: string): void {
+  const db = getDb();
+  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?").run(key, value, value);
+}
+
 function migrate(db: Database.Database) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS profile (
@@ -112,6 +123,14 @@ function migrate(db: Database.Database) {
       started_at TEXT,
       completed_at TEXT,
       created_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  // Key-value settings (for server-side access to UI preferences like watched channels)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
     );
   `);
 

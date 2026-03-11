@@ -6,6 +6,7 @@ import { fetchChannelMessages } from "@/lib/integrations/slack";
 import { fetchEvents } from "@/lib/integrations/google-calendar";
 import { notifyChange } from "@/lib/changeNotifier";
 import { startSlackSocket } from "@/lib/slackSocket";
+import { setSetting } from "@/lib/db";
 
 export async function POST(request: Request) {
   // Auto-start Slack Socket Mode on first sync
@@ -36,6 +37,11 @@ export async function POST(request: Request) {
       };
 
       const sendItems = () => send("items", getItems());
+
+      // Persist watched channels to DB so server can use them on startup
+      if (watchedChannels && watchedChannels.length > 0) {
+        setSetting("slack:watchedChannels", JSON.stringify(watchedChannels));
+      }
 
       // Run sources in parallel — on quick sync, only refresh Slack
       const isQuickSync = slackLookbackMinutes != null && slackLookbackMinutes < 60;

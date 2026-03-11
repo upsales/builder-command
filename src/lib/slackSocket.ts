@@ -4,8 +4,17 @@ import { getProfile, upsertItem } from "./items";
 import { getDb } from "./db";
 import { notifyChange } from "./changeNotifier";
 
-let socketClient: SocketModeClient | null = null;
-let started = false;
+// Use globalThis to share state across Next.js dev mode module instances
+const g = globalThis as unknown as {
+  __slackSocketClient?: SocketModeClient | null;
+  __slackSocketStarted?: boolean;
+  __slackSocketLog?: SlackSocketEvent[];
+};
+
+function getSocketClient() { return g.__slackSocketClient ?? null; }
+function setSocketClient(c: SocketModeClient | null) { g.__slackSocketClient = c; }
+function isStarted() { return g.__slackSocketStarted ?? false; }
+function setStarted(v: boolean) { g.__slackSocketStarted = v; }
 
 // Event log for debugging
 export interface SlackSocketEvent {
@@ -13,17 +22,21 @@ export interface SlackSocketEvent {
   type: string;
   detail: string;
 }
-const eventLog: SlackSocketEvent[] = [];
-const MAX_LOG = 50;
+function getEventLog(): SlackSocketEvent[] {
+  if (!g.__slackSocketLog) g.__slackSocketLog = [];
+  return g.__slackSocketLog;
+}
+const MAX_LOG = 200;
 
 function logEvent(type: string, detail: string) {
   const time = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  eventLog.unshift({ time, type, detail });
-  if (eventLog.length > MAX_LOG) eventLog.length = MAX_LOG;
+  const log = getEventLog();
+  log.unshift({ time, type, detail });
+  if (log.length > MAX_LOG) log.length = MAX_LOG;
 }
 
 export function getSlackSocketLog(): SlackSocketEvent[] {
-  return eventLog;
+  return getEventLog();
 }
 
 // User name cache
@@ -88,8 +101,8 @@ async function resolveUserMentions(webClient: WebClient, text: string): Promise<
 }
 
 export function startSlackSocket(): void {
-  if (started) return;
-  started = true;
+  if (isStarted()) return;
+  setStarted(true);
 
   const appToken = process.env.SLACK_APP_TOKEN;
   const botToken = process.env.SLACK_BOT_TOKEN;
@@ -99,24 +112,43 @@ export function startSlackSocket(): void {
     return;
   }
 
-  socketClient = new SocketModeClient({ appToken });
+  const socketClient = new SocketModeClient({ appToken, clientOptions: { retries: 2 } });
+  setSocketClient(socketClient);
   const webClient = new WebClient(botToken);
+
+  // Debug: catch-all for any Slack event
+  socketClient.on("slack_event" as string, ({ type, body }: { type: string; body?: unknown }) => {
+    const bodyStr = body ? JSON.stringify(body).slice(0, 150) : "";
+    logEvent("ws_event", `type=${type} ${bodyStr}`);
+  });
 
   logEvent("init", "Starting Socket Mode connection...");
   console.log("[slack-socket] Starting Socket Mode connection...");
 
   // Listen for all message events
   socketClient.on("message", async ({ event, ack }) => {
+    logEvent("msg_recv", `ch=${event.channel} user=${event.user} subtype=${event.subtype ?? "none"} ch_type=${event.channel_type ?? "?"} thread_ts=${event.thread_ts ?? "none"} ts=${event.ts} text="${(event.text ?? "").substring(0, 80)}"${event.files ? ` files=${event.files.length}` : ""}`);
     await ack();
-    logEvent("raw", `ch=${event.channel} user=${event.user} subtype=${event.subtype ?? "none"} text="${(event.text ?? "").substring(0, 60)}"`);
+    logEvent("msg_ack", `Acked message ${event.ts}`);
 
     const profile = getProfile();
-    if (!profile?.slack_user_id) { logEvent("skip", "No profile/slack_user_id"); return; }
+    if (!profile?.slack_user_id) {
+      logEvent("msg_skip", "No profile or slack_user_id configured");
+      return;
+    }
+    logEvent("msg_check", `My user_id=${profile.slack_user_id}, sender=${event.user}`);
 
     // Skip messages from ourselves
-    if (event.user === profile.slack_user_id) { logEvent("skip", "Own message"); return; }
-    // Skip message subtypes we don't care about (channel_join, etc.) but allow thread_broadcast
-    if (event.subtype && event.subtype !== "thread_broadcast") { logEvent("skip", `Subtype: ${event.subtype}`); return; }
+    if (event.user === profile.slack_user_id) {
+      logEvent("msg_skip", `Own message in ch=${event.channel}, ignoring`);
+      return;
+    }
+    // Skip non-content subtypes (channel_join, channel_leave, etc.) but allow actual message content
+    const allowedSubtypes = new Set(["thread_broadcast", "file_share", "me_message"]);
+    if (event.subtype && !allowedSubtypes.has(event.subtype)) {
+      logEvent("msg_skip", `Subtype=${event.subtype}, ignoring`);
+      return;
+    }
 
     const channelId = event.channel;
     const ts = event.ts;
@@ -126,23 +158,34 @@ export function startSlackSocket(): void {
     const isDm = event.channel_type === "im";
 
     const mentionsUser = text.includes(`<@${profile.slack_user_id}>`);
+    logEvent("msg_parse", `isDm=${isDm} mentionsUser=${mentionsUser} isThread=${!!(threadTs && threadTs !== ts)} text="${text.substring(0, 60)}"`);
 
     // Resolve names
+    logEvent("msg_resolve", `Resolving sender ${sender}...`);
     const senderName = await resolveUserName(webClient, sender);
+    logEvent("msg_resolve", `Sender resolved: ${sender} → ${senderName}`);
+
+    logEvent("msg_resolve", `Resolving channel ${channelId} (isDm=${isDm})...`);
     const channelName = await resolveChannelName(webClient, channelId, isDm);
+    logEvent("msg_resolve", `Channel resolved: ${channelId} → ${channelName}`);
 
     // Resolve all <@U...> mentions in the text to real names
     const resolvedText = await resolveUserMentions(webClient, text);
+    if (resolvedText !== text) {
+      logEvent("msg_resolve", `Resolved mentions in text`);
+    }
 
     // If this is a thread reply, update the parent item's reply count
     if (threadTs && threadTs !== ts) {
       const db = getDb();
       const parentSourceId = `${channelId}-${threadTs}`;
+      logEvent("thread", `Thread reply detected, checking parent ${parentSourceId}`);
       const existing = db.prepare(
         "SELECT raw_data FROM items WHERE source = 'slack' AND source_id = ?"
       ).get(parentSourceId) as { raw_data: string | null } | undefined;
 
       if (existing?.raw_data) {
+        logEvent("thread", `Parent found, updating reply count`);
         try {
           const raw = JSON.parse(existing.raw_data);
           raw.replyCount = (raw.replyCount ?? 0) + 1;
@@ -153,8 +196,13 @@ export function startSlackSocket(): void {
           db.prepare(
             "UPDATE items SET raw_data = ? WHERE source = 'slack' AND source_id = ?"
           ).run(JSON.stringify(raw), parentSourceId);
+          logEvent("thread", `Parent updated: replyCount=${raw.replyCount} users=${raw.replyUserNames.join(",")}`);
           notifyChange();
-        } catch { /* ignore */ }
+        } catch (e) {
+          logEvent("error", `Failed to update parent: ${e instanceof Error ? e.message : e}`);
+        }
+      } else {
+        logEvent("thread", `Parent NOT found in DB — not tracked`);
       }
     }
 
@@ -168,12 +216,15 @@ export function startSlackSocket(): void {
       ).get(parentSourceId);
 
       if (parentExists) {
-        // Parent is tracked — create an item for this thread reply so user sees it
+        logEvent("thread_add", `Adding thread reply item from ${senderName} in #${channelName} (parent tracked)`);
         let permalink = `https://slack.com/archives/${channelId}/p${ts.replace(".", "")}`;
         try {
           const pRes = await webClient.chat.getPermalink({ channel: channelId, message_ts: ts });
           if (pRes.permalink) permalink = pRes.permalink;
-        } catch { /* use fallback */ }
+          logEvent("thread_add", `Got permalink: ${permalink.slice(0, 80)}`);
+        } catch (e) {
+          logEvent("warn", `Permalink fetch failed: ${e instanceof Error ? e.message : e}`);
+        }
 
         const files = event.files?.map((f: Record<string, string>) => ({
           name: f.name,
@@ -201,28 +252,36 @@ export function startSlackSocket(): void {
             isThreadReply: true,
           }),
         });
-        logEvent("added", `Thread reply from ${senderName} in #${channelName} (parent tracked)`);
+        logEvent("added", `Thread reply from ${senderName} in #${channelName}: "${resolvedText.substring(0, 60)}"`);
         notifyChange();
-        return; // Already handled as thread reply item + parent was updated above
+        return;
+      } else {
+        logEvent("thread_skip", `Thread reply but parent not tracked, checking if mention/DM...`);
       }
     }
 
     // New mention or DM — insert as new item
     if (mentionsUser || isDm) {
-      // Get permalink
+      logEvent("msg_add", `Adding ${isDm ? "DM" : "mention"} from ${senderName} in #${channelName}`);
+
       let permalink = `https://slack.com/archives/${channelId}/p${ts.replace(".", "")}`;
       try {
         const pRes = await webClient.chat.getPermalink({ channel: channelId, message_ts: ts });
         if (pRes.permalink) permalink = pRes.permalink;
-      } catch { /* use fallback */ }
+        logEvent("msg_add", `Got permalink: ${permalink.slice(0, 80)}`);
+      } catch (e) {
+        logEvent("warn", `Permalink fetch failed: ${e instanceof Error ? e.message : e}`);
+      }
 
-      // Get files if any
       const files = event.files?.map((f: Record<string, string>) => ({
         name: f.name,
         mimetype: f.mimetype,
         url: f.url_private,
         thumb: f.thumb_360 || f.thumb_80,
       })) ?? [];
+      if (files.length > 0) {
+        logEvent("msg_add", `Message has ${files.length} file(s): ${files.map(f => f.name).join(", ")}`);
+      }
 
       upsertItem({
         source: "slack",
@@ -243,32 +302,80 @@ export function startSlackSocket(): void {
           isThreadReply: !!(threadTs && threadTs !== ts),
         }),
       });
-      logEvent("added", `${isDm ? "DM" : "Mention"} from ${senderName} in #${channelName}`);
+      logEvent("added", `${isDm ? "DM" : "Mention"} from ${senderName} in #${channelName}: "${resolvedText.substring(0, 60)}"`);
       notifyChange();
     } else {
-      logEvent("ignored", `No mention/DM — from ${senderName} in #${channelName}`);
+      logEvent("msg_drop", `Not a mention or DM — from ${senderName} in #${channelName}: "${resolvedText.substring(0, 60)}"`);
     }
   });
 
   // Listen for reaction events
   socketClient.on("reaction_added", async ({ event, ack }) => {
     await ack();
+    logEvent("reaction", `reaction_added: ${event.reaction} by ${event.user} on item_user=${event.item_user} in ch=${event.item?.channel}`);
     const profile = getProfile();
     if (event.user === profile?.slack_user_id) {
+      logEvent("reaction", `Own reaction — triggering UI refresh`);
       notifyChange();
     }
   });
 
-  socketClient.start().then(() => {
+  socketClient.on("reaction_removed", async ({ event, ack }: { event: Record<string, unknown>; ack: () => Promise<void> }) => {
+    await ack();
+    logEvent("reaction", `reaction_removed: ${event.reaction} by ${event.user}`);
+  });
+
+  // Add event listeners for connection lifecycle
+  socketClient.on("connected" as string, () => {
     logEvent("connected", "Socket Mode connected to Slack");
     console.log("[slack-socket] Connected to Slack via Socket Mode");
+  });
+  socketClient.on("authenticated" as string, (data: unknown) => {
+    logEvent("auth", `Authenticated: ${JSON.stringify(data).slice(0, 200)}`);
+    console.log("[slack-socket] Authenticated");
+  });
+  socketClient.on("disconnected" as string, () => {
+    logEvent("disconnected", "Socket Mode disconnected");
+    console.log("[slack-socket] Disconnected from Slack");
+  });
+  socketClient.on("reconnecting" as string, () => {
+    logEvent("reconnecting", "Socket Mode reconnecting...");
+    console.log("[slack-socket] Reconnecting to Slack...");
+  });
+  socketClient.on("connecting" as string, () => {
+    logEvent("connecting", "Socket Mode connecting...");
+  });
+  socketClient.on("error" as string, (err: Error) => {
+    logEvent("error", `Socket error: ${err?.message ?? JSON.stringify(err)}`);
+    console.error("[slack-socket] Socket error:", err);
+  });
+  socketClient.on("close" as string, () => {
+    logEvent("close", "WebSocket closed");
+  });
+
+  socketClient.start().then(() => {
+    logEvent("started", "Socket Mode start() resolved");
+    console.log("[slack-socket] start() resolved");
   }).catch((err) => {
     logEvent("error", `Failed to connect: ${err instanceof Error ? err.message : err}`);
     console.error("[slack-socket] Failed to connect:", err);
-    started = false;
+    setStarted(false);
+    setSocketClient(null);
   });
 }
 
 export function isSlackSocketRunning(): boolean {
-  return started && socketClient !== null;
+  return isStarted() && getSocketClient() !== null;
+}
+
+export function restartSlackSocket(): void {
+  const client = getSocketClient();
+  if (client) {
+    try { client.disconnect(); } catch { /* ignore */ }
+  }
+  setSocketClient(null);
+  setStarted(false);
+  getEventLog().length = 0;
+  logEvent("restart", "Socket manually restarted");
+  startSlackSocket();
 }
