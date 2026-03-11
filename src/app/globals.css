@@ -159,3 +159,12 @@ button, a, select, [role="button"], label, summary {
   from { opacity: 0; transform: translateX(-50%) translateY(2px); }
   to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
+
+/* Slack message slide-in animation */
+@keyframes slack-slide-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.slack-msg-enter {
+  animation: slack-slide-in 0.25s ease-out;
+}

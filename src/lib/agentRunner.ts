@@ -269,6 +269,129 @@ TASK: "${todo.text}"`;
   notifyChange();
 }
 
+export async function continueSession(sessionId: string, followUpText: string): Promise<string> {
+  const db = getDb();
+  const session = db.prepare("SELECT * FROM agent_sessions WHERE id = ?").get(sessionId) as {
+    id: string; todo_id: string; status: string; messages?: string; tool_calls?: string;
+  } | undefined;
+
+  if (!session) throw new Error("Session not found");
+  if (session.status === "running") throw new Error("Session is already running");
+
+  // Restore previous messages
+  let previousMessages: Anthropic.MessageParam[] = [];
+  if (session.messages) {
+    try { previousMessages = JSON.parse(session.messages); } catch { /* start fresh */ }
+  }
+  let toolCallsLog: { tool: string; input: unknown; result: string; timestamp: string }[] = [];
+  if (session.tool_calls) {
+    try { toolCallsLog = JSON.parse(session.tool_calls); } catch { /* start fresh */ }
+  }
+
+  // Get the task text
+  const todo = db.prepare("SELECT text FROM daily_todos WHERE id = ?").get(session.todo_id) as { text: string } | undefined;
+  const taskText = todo?.text ?? "task";
+
+  // Mark session as running again
+  db.prepare(
+    "UPDATE agent_sessions SET status = 'running', summary = NULL, failure_reason = NULL, completed_at = NULL WHERE id = ?"
+  ).run(sessionId);
+  notifyChange();
+
+  processing = true;
+  currentTodoId = session.todo_id;
+
+  try {
+    const basePrompt = buildSystemPrompt();
+    const agentPrompt = `${basePrompt}
+
+## AGENT MODE (Follow-up)
+You are an autonomous AI agent continuing work on a task. The user has sent a follow-up message.
+
+RULES:
+1. Consider the previous conversation context
+2. Execute the follow-up request using tools
+3. End with a clear **SUMMARY:** section describing what you accomplished
+4. If you CANNOT complete the request, clearly state WHY
+5. Be efficient — minimum tool calls needed
+6. NEVER use the complete_todo tool
+
+ORIGINAL TASK: "${taskText}"`;
+
+    // Add follow-up as new user message
+    const currentMessages: Anthropic.MessageParam[] = [
+      ...previousMessages,
+      { role: "user", content: followUpText },
+    ];
+
+    let maxRounds = 10;
+    let finalText = "";
+
+    while (maxRounds > 0) {
+      maxRounds--;
+
+      const response = await client.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 4096,
+        system: agentPrompt,
+        tools,
+        messages: currentMessages,
+      });
+
+      for (const block of response.content) {
+        if (block.type === "text") finalText += block.text;
+      }
+
+      let hasToolUse = false;
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+
+      for (const block of response.content) {
+        if (block.type === "tool_use") {
+          hasToolUse = true;
+          const result = await executeTool(block.name, block.input as Record<string, unknown>);
+          toolCallsLog.push({
+            tool: block.name,
+            input: block.input,
+            result: result.length > 500 ? result.slice(0, 500) + "..." : result,
+            timestamp: new Date().toISOString(),
+          });
+          toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
+        }
+      }
+
+      if (!hasToolUse || response.stop_reason !== "tool_use") break;
+
+      currentMessages.push(
+        { role: "assistant" as const, content: response.content },
+        { role: "user" as const, content: toolResults },
+      );
+
+      db.prepare("UPDATE agent_sessions SET tool_calls = ?, messages = ? WHERE id = ?")
+        .run(JSON.stringify(toolCallsLog), JSON.stringify(currentMessages), sessionId);
+      notifyChange();
+    }
+
+    const summary = extractSummary(finalText);
+    db.prepare(
+      `UPDATE agent_sessions SET status = 'completed', summary = ?, tool_calls = ?, messages = ?, completed_at = datetime('now') WHERE id = ?`
+    ).run(summary, JSON.stringify(toolCallsLog), JSON.stringify(currentMessages), sessionId);
+
+    processing = false;
+    currentTodoId = null;
+    notifyChange();
+    return sessionId;
+  } catch (e) {
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    db.prepare(
+      "UPDATE agent_sessions SET status = 'failed', failure_reason = ?, completed_at = datetime('now') WHERE id = ?"
+    ).run(errorMsg, sessionId);
+    processing = false;
+    currentTodoId = null;
+    notifyChange();
+    throw e;
+  }
+}
+
 function extractSummary(text: string): string {
   // Try to find a **SUMMARY:** or SUMMARY: section — capture everything after it
   const summaryMatch = text.match(/\*{0,2}SUMMARY[:\s*]*\*{0,2}\s*([\s\S]+?)$/i);

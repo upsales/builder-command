@@ -175,8 +175,9 @@ export function startSlackSocket(): void {
       logEvent("msg_resolve", `Resolved mentions in text`);
     }
 
-    // If this is a thread reply, update the parent item's reply count
-    if (threadTs && threadTs !== ts) {
+    // If this is a thread reply, update the parent item instead of creating a separate item
+    const isThreadReply = !!(threadTs && threadTs !== ts);
+    if (isThreadReply) {
       const db = getDb();
       const parentSourceId = `${channelId}-${threadTs}`;
       logEvent("thread", `Thread reply detected, checking parent ${parentSourceId}`);
@@ -185,7 +186,7 @@ export function startSlackSocket(): void {
       ).get(parentSourceId) as { raw_data: string | null } | undefined;
 
       if (existing?.raw_data) {
-        logEvent("thread", `Parent found, updating reply count`);
+        logEvent("thread", `Parent found, updating with new reply from ${senderName}`);
         try {
           const raw = JSON.parse(existing.raw_data);
           raw.replyCount = (raw.replyCount ?? 0) + 1;
@@ -193,70 +194,31 @@ export function startSlackSocket(): void {
           if (!raw.replyUserNames.includes(senderName)) {
             raw.replyUserNames.push(senderName);
           }
+          // Store new reply inline so the UI can show it in the thread
+          if (!raw.newReplies) raw.newReplies = [];
+          raw.newReplies.push({
+            senderName,
+            text: resolvedText,
+            timestamp: ts,
+            sender,
+          });
+          // Mark parent as having new thread activity
+          raw.hasNewReplies = true;
           db.prepare(
             "UPDATE items SET raw_data = ? WHERE source = 'slack' AND source_id = ?"
           ).run(JSON.stringify(raw), parentSourceId);
-          logEvent("thread", `Parent updated: replyCount=${raw.replyCount} users=${raw.replyUserNames.join(",")}`);
+          logEvent("thread", `Parent updated: replyCount=${raw.replyCount} newReplies=${raw.newReplies.length}`);
           notifyChange();
         } catch (e) {
           logEvent("error", `Failed to update parent: ${e instanceof Error ? e.message : e}`);
         }
+        // Don't create a separate item — the reply lives inside the parent thread
+        if (!mentionsUser && !isDm) {
+          return;
+        }
+        // If it also mentions us or is a DM, fall through to create a standalone item too
       } else {
         logEvent("thread", `Parent NOT found in DB — not tracked`);
-      }
-    }
-
-    // Thread reply where we have the parent tracked — user has notifications on
-    const isThreadReply = !!(threadTs && threadTs !== ts);
-    if (isThreadReply && !mentionsUser && !isDm) {
-      const db = getDb();
-      const parentSourceId = `${channelId}-${threadTs}`;
-      const parentExists = db.prepare(
-        "SELECT 1 FROM items WHERE source = 'slack' AND source_id = ?"
-      ).get(parentSourceId);
-
-      if (parentExists) {
-        logEvent("thread_add", `Adding thread reply item from ${senderName} in #${channelName} (parent tracked)`);
-        let permalink = `https://slack.com/archives/${channelId}/p${ts.replace(".", "")}`;
-        try {
-          const pRes = await webClient.chat.getPermalink({ channel: channelId, message_ts: ts });
-          if (pRes.permalink) permalink = pRes.permalink;
-          logEvent("thread_add", `Got permalink: ${permalink.slice(0, 80)}`);
-        } catch (e) {
-          logEvent("warn", `Permalink fetch failed: ${e instanceof Error ? e.message : e}`);
-        }
-
-        const files = event.files?.map((f: Record<string, string>) => ({
-          name: f.name,
-          mimetype: f.mimetype,
-          url: f.url_private,
-          thumb: f.thumb_360 || f.thumb_80,
-        })) ?? [];
-
-        upsertItem({
-          source: "slack",
-          source_id: `${channelId}-${ts}`,
-          title: `#${channelName} — ${senderName}: ${resolvedText.substring(0, 100)}`,
-          url: permalink,
-          raw_data: JSON.stringify({
-            channel: channelId,
-            channelName,
-            text: resolvedText,
-            sender,
-            senderName,
-            threadTs,
-            timestamp: ts,
-            isUnread: true,
-            files: files.length > 0 ? files : undefined,
-            replyCount: 0,
-            isThreadReply: true,
-          }),
-        });
-        logEvent("added", `Thread reply from ${senderName} in #${channelName}: "${resolvedText.substring(0, 60)}"`);
-        notifyChange();
-        return;
-      } else {
-        logEvent("thread_skip", `Thread reply but parent not tracked, checking if mention/DM...`);
       }
     }
 

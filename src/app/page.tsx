@@ -139,10 +139,11 @@ const SOURCE_STYLE: Record<string, string> = {
 };
 
 // ─── Custom Actions Menu ──────────────────────────────────────
-function CustomActionsMenu({ source, context, onAction, size = 12 }: {
+function CustomActionsMenu({ source, context, onAction, onAgentAction, size = 12 }: {
   source: "linear" | "github";
   context: Record<string, string>;
   onAction: (prompt: string) => void;
+  onAgentAction?: (prompt: string) => void;
   size?: number;
 }) {
   const [open, setOpen] = useState(false);
@@ -187,6 +188,15 @@ function CustomActionsMenu({ source, context, onAction, size = 12 }: {
               >
                 <span>{a.emoji}</span> {a.name}
               </button>
+              {onAgentAction && !editing && (
+                <button
+                  onClick={() => { onAgentAction(fillTemplate(a.prompt)); setOpen(false); }}
+                  className="text-purple-400/50 hover:text-purple-400 px-2 text-xs flex items-center gap-0.5"
+                  title="Run with Agent"
+                >
+                  <Bot size={10} />
+                </button>
+              )}
               {editing && (
                 <button onClick={() => setActions(actions.filter((x) => x.id !== a.id))} className="text-red-400/50 hover:text-red-400 px-2 text-xs">×</button>
               )}
@@ -735,6 +745,10 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                   } catch { return null; }
                 })()}
               </div>
+              {/* Follow-up input */}
+              {agentSessionData.status !== "running" && (
+                <AgentFollowUpInput sessionId={agentSessionData.id} onSent={() => loadAgentSession(agentSessionData.id)} />
+              )}
             </div>
           ) : loadingAgentSession ? (
             <div className="flex items-center justify-center h-full text-muted">
@@ -2327,6 +2341,10 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   const [hiddenSlackSendersArr, setHiddenSlackSendersArr] = useLocalStorage<string[]>("filter:hiddenSlackSenders", []);
   const hiddenSlackSenders = new Set(hiddenSlackSendersArr);
   const hiddenCalendars = new Set(hiddenCalendarsArr);
+  const [inProgressCollapsed, setInProgressCollapsed] = useLocalStorage("ui:inProgressCollapsed", false);
+  const [pendingReviewCollapsed, setPendingReviewCollapsed] = useLocalStorage("ui:pendingReviewCollapsed", false);
+  const [myTasksCollapsed, setMyTasksCollapsed] = useLocalStorage("ui:myTasksCollapsed", false);
+  const [calendarCollapsed, setCalendarCollapsed] = useLocalStorage("ui:calendarCollapsed", false);
   const toggleCalendar = (calName: string) => {
     setHiddenCalendarsArr((prev) => {
       const s = new Set(prev);
@@ -2355,6 +2373,15 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
     setInProgressKey(`${item.source}:${item.source_id}`);
     onChatAbout(prompt, prInfo);
   }, [setInProgressKey, onChatAbout]);
+
+  const agentActionForItem = useCallback((item: TodoItem) => async (prompt: string) => {
+    setInProgressKey(`${item.source}:${item.source_id}`);
+    await fetch("/api/agent/start-from-item", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, source: item.source, source_id: item.source_id }),
+    });
+  }, [setInProgressKey]);
 
   // Recently hidden
   const [showDismissed, setShowDismissed] = useState(false);
@@ -2546,7 +2573,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
     channelItems.sort((a, b) => {
       const aRaw = a.raw_data ? JSON.parse(a.raw_data) : {};
       const bRaw = b.raw_data ? JSON.parse(b.raw_data) : {};
-      return parseFloat(aRaw.timestamp ?? "0") - parseFloat(bRaw.timestamp ?? "0");
+      return parseFloat(bRaw.timestamp ?? "0") - parseFloat(aRaw.timestamp ?? "0");
     });
   }
   const sortedChannels = Array.from(slackByChannel.entries()).sort((a, b) => {
@@ -2563,8 +2590,16 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
 
   return (
     <div className="space-y-3">
-      {/* Calendar Timeline — always visible */}
-      <CalendarTimeline items={items} onDismiss={onDismiss} hiddenCalendars={hiddenCalendars} onToggleCalendar={toggleCalendar} />
+      {/* Calendar Timeline — sticky + collapsible */}
+      <div className="sticky top-0 z-10 bg-background pb-1">
+        <div className="flex items-center gap-2 mb-1">
+          <button onClick={() => setCalendarCollapsed(!calendarCollapsed)} className="text-xs text-muted hover:text-foreground transition-colors flex items-center gap-1">
+            {calendarCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+            <span className="uppercase tracking-wide font-medium">Calendar</span>
+          </button>
+        </div>
+        {!calendarCollapsed && <CalendarTimeline items={items} onDismiss={onDismiss} hiddenCalendars={hiddenCalendars} onToggleCalendar={toggleCalendar} />}
+      </div>
 
       {/* Recently Hidden toggle + panel */}
       <div className="flex justify-end -mt-1 mb-1">
@@ -2760,22 +2795,23 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
       })()}
 
       {activeTab === "queue" && (
-        <div className="space-y-1.5">
+        <div className="space-y-4">
           {/* In Progress — pinned above My Tasks */}
           {(inProgressItem || inProgressTodoId) && (() => {
             const inProgressTodo = inProgressTodoId ? dailyTodos.find(t => t.id === inProgressTodoId) : null;
             return (
               <div className="space-y-1">
-                <h3 className="text-xs uppercase tracking-wide text-muted flex items-center gap-2">
+                <button onClick={() => setInProgressCollapsed(!inProgressCollapsed)} className="text-xs uppercase tracking-wide text-muted flex items-center gap-2 hover:text-foreground transition-colors">
+                  {inProgressCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                   <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 flex items-center gap-1"><Play size={10} fill="currentColor" /> In Progress</span>
-                </h3>
-                <div className="bg-sky-500/5 border border-sky-500/30 rounded-lg relative">
+                </button>
+                {!inProgressCollapsed && <div className="bg-sky-500/5 border border-sky-500/30 rounded-lg relative">
                   <div className="absolute top-0 left-0 w-1 h-full bg-sky-400 rounded-l-lg" />
                   {inProgressItem?.source === "linear" && (
-                    <LinearCard item={inProgressItem} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} />
+                    <LinearCard item={inProgressItem} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} />
                   )}
                   {inProgressItem?.source === "github" && (
-                    <GithubCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} repoStatus={repoStatuses[(inProgressItem.raw_data ? JSON.parse(inProgressItem.raw_data) : {}).repo]} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} />
+                    <GithubCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} repoStatus={repoStatuses[(inProgressItem.raw_data ? JSON.parse(inProgressItem.raw_data) : {}).repo]} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} />
                   )}
                   {inProgressItem?.source === "calendar" && (
                     <CalendarCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} />
@@ -2791,7 +2827,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                       </button>
                     </div>
                   )}
-                </div>
+                </div>}
               </div>
             );
           })()}
@@ -2802,11 +2838,12 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
             if (pendingReview.length === 0) return null;
             return (
               <div className="space-y-1">
-                <h3 className="text-xs uppercase tracking-wide text-muted flex items-center gap-2">
+                <button onClick={() => setPendingReviewCollapsed(!pendingReviewCollapsed)} className="text-xs uppercase tracking-wide text-muted flex items-center gap-2 hover:text-foreground transition-colors">
+                  {pendingReviewCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                   <span className="px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 flex items-center gap-1"><Bot size={10} /> Pending Review</span>
                   <span className="text-[10px] text-muted/50">{pendingReview.length}</span>
-                </h3>
-                <div className="space-y-1.5">
+                </button>
+                {!pendingReviewCollapsed && <div className="space-y-1.5">
                   {pendingReview.map(todo => {
                     const session = agentSessions[todo.id];
                     const isFailed = session.status === "failed";
@@ -2852,19 +2889,20 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                       </div>
                     );
                   })}
-                </div>
+                </div>}
               </div>
             );
           })()}
 
           {/* My Tasks section — always visible */}
           <div className="space-y-1">
-            <h3 className="text-xs uppercase tracking-wide text-muted flex items-center gap-2">
+            <button onClick={() => setMyTasksCollapsed(!myTasksCollapsed)} className="text-xs uppercase tracking-wide text-muted flex items-center gap-2 hover:text-foreground transition-colors">
+              {myTasksCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
               <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">My Tasks</span>
-            </h3>
-            <div className="bg-card border border-border rounded-lg px-3 py-2">
+            </button>
+            {!myTasksCollapsed && <div className="bg-card border border-border rounded-lg px-3 py-2">
               <TodoSection todos={dailyTodos} onRefresh={() => { onRefreshTodos(); onRefreshXp(); }} inProgressTodoId={inProgressTodoId} onToggleInProgressTodo={toggleInProgressTodo} agentSessions={agentSessions} onOpenAgentSession={(sessionId) => { setChatCollapsed(false); chatRef.current?.openAgentSession(sessionId); }} />
-            </div>
+            </div>}
           </div>
 
           {/* Slack section — grouped by channel */}
@@ -2936,7 +2974,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                 {Array.from(githubByRepo.entries()).map(([repo, repoItems]) => (
                   <CollapsibleGroup key={repo} label={repo} count={repoItems.length} mono defaultOpen>
                     {repoItems.map((item) => (
-                      <GithubCard key={item.id} item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} />
+                      <GithubCard key={item.id} item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} />
                     ))}
                   </CollapsibleGroup>
                 ))}
@@ -2964,7 +3002,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                   {Array.from(linearGrouped.entries()).map(([group, groupItems]) => (
                     <CollapsibleGroup key={group} label={group} icon={<CircleDot size={10} />} count={groupItems.length} defaultOpen>
                       {groupItems.map((item) => (
-                        <LinearCard key={item.id} item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} />
+                        <LinearCard key={item.id} item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} />
                       ))}
                     </CollapsibleGroup>
                   ))}
@@ -3174,10 +3212,10 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   );
 }
 
-function CollapsibleGroup({ label, icon, count, mono, defaultOpen = false, onDismissAll, children }: {
-  label: string; icon?: React.ReactNode; count: number; mono?: boolean; defaultOpen?: boolean; onDismissAll?: () => void; children: React.ReactNode;
+function CollapsibleGroup({ label, icon, count, mono, defaultOpen = false, onDismissAll, children, storageKey }: {
+  label: string; icon?: React.ReactNode; count: number; mono?: boolean; defaultOpen?: boolean; onDismissAll?: () => void; children: React.ReactNode; storageKey?: string;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [open, setOpen] = useLocalStorage(storageKey ?? `__cg_${label}`, defaultOpen);
   return (
     <div>
       <div className="flex items-center gap-2 text-xs text-muted mb-1 px-1 group/header">
@@ -3198,8 +3236,8 @@ function CollapsibleGroup({ label, icon, count, mono, defaultOpen = false, onDis
   );
 }
 
-function ExpandableCard({ item, summary, children, onDismiss, onChatAbout, isInProgress, onToggleInProgress }: {
-  item: TodoItem; summary?: React.ReactNode; children: React.ReactNode; onDismiss?: (item: TodoItem) => void; onChatAbout?: (prompt: string) => void; isInProgress?: boolean; onToggleInProgress?: () => void;
+function ExpandableCard({ item, summary, children, onDismiss, onChatAbout, onAgentAction, isInProgress, onToggleInProgress }: {
+  item: TodoItem; summary?: React.ReactNode; children: React.ReactNode; onDismiss?: (item: TodoItem) => void; onChatAbout?: (prompt: string) => void; onAgentAction?: (prompt: string) => void; isInProgress?: boolean; onToggleInProgress?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
@@ -3216,7 +3254,7 @@ function ExpandableCard({ item, summary, children, onDismiss, onChatAbout, isInP
         {/* Custom Actions — prominent, always visible */}
         {onChatAbout && (item.source === "github" || item.source === "linear") && (
           <div onClick={(e) => e.stopPropagation()}>
-            <CustomActionsMenu source={item.source === "github" ? "github" : "linear"} context={{ identifier: raw.identifier ?? item.source_id, title: raw.title ?? item.title ?? "", description: raw.body ?? raw.description ?? "", url: item.url ?? "", state: raw.state ?? "", assignee: raw.assignee ?? "", labels: (raw.labels ?? []).join(", "), repo: raw.repo ?? "", author: raw.author ?? "", pr_number: String(raw.id ?? ""), reviewers: (raw.reviewers ?? []).join(", ") }} onAction={onChatAbout} size={16} />
+            <CustomActionsMenu source={item.source === "github" ? "github" : "linear"} context={{ identifier: raw.identifier ?? item.source_id, title: raw.title ?? item.title ?? "", description: raw.body ?? raw.description ?? "", url: item.url ?? "", state: raw.state ?? "", assignee: raw.assignee ?? "", labels: (raw.labels ?? []).join(", "), repo: raw.repo ?? "", author: raw.author ?? "", pr_number: String(raw.id ?? ""), reviewers: (raw.reviewers ?? []).join(", ") }} onAction={onChatAbout} onAgentAction={onAgentAction} size={16} />
           </div>
         )}
         {item.url && (
@@ -3270,12 +3308,13 @@ const STATE_ICONS: Record<string, string> = {
   "Waiting for Customer": "text-yellow-400",
 };
 
-function LinearCard({ item, states, members, onDismiss, onChatAbout, onUpdateItem, hiddenStates, isInProgress, onToggleInProgress }: {
+function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentAction, onUpdateItem, hiddenStates, isInProgress, onToggleInProgress }: {
   item: TodoItem;
   states: { id: string; name: string; type: string }[];
   members: { id: string; name: string; email: string }[];
   onDismiss: (item: TodoItem) => void;
   onChatAbout: (prompt: string) => void;
+  onAgentAction?: (prompt: string) => void;
   onUpdateItem: (itemId: string, updates: Record<string, unknown>) => void;
   hiddenStates: Set<string>;
   isInProgress?: boolean;
@@ -3373,7 +3412,7 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onUpdateIte
               <ExternalLink size={12} />
             </a>
           )}
-          <CustomActionsMenu source="linear" context={{ identifier: raw.identifier ?? "", title: raw.title ?? "", description: (raw.description ?? "").slice(0, 500), state: raw.state ?? "", assignee: raw.assignee ?? "", project: raw.project ?? "", url: item.url ?? "" }} onAction={(prompt) => onChatAbout(prompt)} />
+          <CustomActionsMenu source="linear" context={{ identifier: raw.identifier ?? "", title: raw.title ?? "", description: (raw.description ?? "").slice(0, 500), state: raw.state ?? "", assignee: raw.assignee ?? "", project: raw.project ?? "", url: item.url ?? "" }} onAction={(prompt) => onChatAbout(prompt)} onAgentAction={onAgentAction} />
           <SnoozeButton source={item.source} sourceId={item.source_id} onDone={() => onDismiss(item)} />
           <button onClick={(e) => { e.stopPropagation(); onDismiss(item); }} className="text-red-400/50 hover:text-red-400 transition-colors p-1" title="Dismiss">
             <X size={12} />
@@ -3495,7 +3534,7 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onUpdateIte
   );
 }
 
-function GithubCard({ item, onDismiss, onChatAbout, repoStatus, isInProgress, onToggleInProgress }: { item: TodoItem; onDismiss: (item: TodoItem) => void; onChatAbout: (prompt: string, prInfo?: { repo: string; prNumber: number }) => void; repoStatus?: string; isInProgress?: boolean; onToggleInProgress?: () => void }) {
+function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, repoStatus, isInProgress, onToggleInProgress }: { item: TodoItem; onDismiss: (item: TodoItem) => void; onChatAbout: (prompt: string, prInfo?: { repo: string; prNumber: number }) => void; onAgentAction?: (prompt: string) => void; repoStatus?: string; isInProgress?: boolean; onToggleInProgress?: () => void }) {
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   const [merging, setMerging] = useState(false);
   const [mergeResult, setMergeResult] = useState<string | null>(null);
@@ -3589,7 +3628,7 @@ function GithubCard({ item, onDismiss, onChatAbout, repoStatus, isInProgress, on
   };
 
   return (
-    <ExpandableCard item={item} onDismiss={onDismiss} onChatAbout={onChatAbout} isInProgress={isInProgress} onToggleInProgress={onToggleInProgress} summary={
+    <ExpandableCard item={item} onDismiss={onDismiss} onChatAbout={onChatAbout} onAgentAction={onAgentAction} isInProgress={isInProgress} onToggleInProgress={onToggleInProgress} summary={
       <>
         {raw.author && <span className="text-[11px] text-muted flex items-center gap-1"><User size={10} /> {raw.author}</span>}
         {raw.reviewRequested && <span className="text-[11px] text-accent flex items-center gap-1"><GitPullRequest size={10} /> review requested</span>}
@@ -4075,6 +4114,50 @@ function SlackText({ text }: { text: string }) {
   return <>{processText(remaining)}</>;
 }
 
+function AgentFollowUpInput({ sessionId, onSent }: { sessionId: string; onSent: () => void }) {
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+
+  const send = async () => {
+    if (!text.trim() || sending) return;
+    setSending(true);
+    try {
+      await fetch("/api/agent/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, follow_up: text }),
+      });
+      setText("");
+      onSent();
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-border/50 px-4 py-2.5">
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder="Send a follow-up..."
+          className="flex-1 bg-background border border-border rounded px-3 py-1.5 text-xs focus:outline-none focus:border-accent"
+          disabled={sending}
+        />
+        <button
+          onClick={send}
+          disabled={sending || !text.trim()}
+          className="cursor-pointer px-3 py-1.5 rounded bg-purple-600 text-white hover:bg-purple-700 text-xs transition-colors disabled:opacity-50 flex items-center gap-1"
+        >
+          {sending ? <Loader2 size={10} className="animate-spin" /> : <Send size={10} />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function formatTime(ts: string) {
   const d = new Date(parseFloat(ts) * 1000);
   const now = new Date();
@@ -4112,6 +4195,30 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
   const [contextMessages, setContextMessages] = useState<{ senderName: string; text: string; timestamp: string }[]>([]);
   const [loadingContext, setLoadingContext] = useState(false);
   const [contextDirection, setContextDirection] = useState<"before" | "after" | null>(null);
+
+  // Auto-expand thread for thread reply messages or when parent has new replies
+  const threadAutoLoaded = useRef(false);
+  const hasNewReplies = raw.hasNewReplies === true;
+  const newReplies: { senderName: string; text: string; timestamp: string }[] = raw.newReplies ?? [];
+  useEffect(() => {
+    const shouldAutoExpand = raw.isThreadReply || hasNewReplies;
+    const threadTs = raw.threadTs ?? raw.timestamp;
+    if (shouldAutoExpand && threadTs && !threadAutoLoaded.current) {
+      threadAutoLoaded.current = true;
+      setShowThread(true);
+      setLoadingThread(true);
+      fetch(`/api/slack/thread?channel=${raw.channel}&ts=${threadTs}`)
+        .then(r => r.json())
+        .then(data => {
+          if (Array.isArray(data)) {
+            setReplies(data);
+            setActualReplyCount(data.length);
+          }
+        })
+        .finally(() => setLoadingThread(false));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const loadContext = async (direction: "before" | "after") => {
     setLoadingContext(true);
@@ -4194,9 +4301,13 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
         <div className="flex-1 h-px bg-red-500/50" />
       </div>
     )}
-    <div className={`px-4 py-2.5 hover:bg-card-hover transition-all duration-300 group ${fading ? "opacity-0 max-h-0 py-0 overflow-hidden" : ""}`}>
+    <div className={`px-4 py-2.5 hover:bg-card-hover transition-all duration-300 group slack-msg-enter ${fading ? "opacity-0 max-h-0 py-0 overflow-hidden" : ""}`}>
       {/* Main message */}
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-2">
+        {/* Dismiss button on left */}
+        <button onClick={() => fadeAndDismiss(() => onDismiss(item))} className="shrink-0 mt-1 cursor-pointer text-red-400/0 group-hover:text-red-400/50 hover:!text-red-400 transition-colors p-0.5" title="Dismiss">
+          <X size={11} />
+        </button>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold text-foreground">{raw.senderName ?? raw.sender}</span>
@@ -4278,7 +4389,7 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
             </div>
           )}
         </div>
-        {/* Right actions: snooze, link, dismiss */}
+        {/* Right actions: snooze, link */}
         <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
           <SnoozeButton source={item.source} sourceId={item.source_id} onDone={() => fadeAndDismiss(() => onDismiss(item))} />
           {item.url && (
@@ -4286,9 +4397,6 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
               <ExternalLink size={12} />
             </a>
           )}
-          <button onClick={() => fadeAndDismiss(() => onDismiss(item))} className="cursor-pointer text-red-400/50 hover:text-red-400 transition-colors p-1" title="Dismiss">
-            <X size={12} />
-          </button>
         </div>
       </div>
 
@@ -4334,7 +4442,7 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
       )}
 
       {/* Thread indicator */}
-      {replyCount > 0 && (
+      {(replyCount > 0 || hasNewReplies) && (
         <button
           onClick={async () => {
             if (!showThread && replies.length === 0) {
@@ -4356,6 +4464,9 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
         >
           {loadingThread ? <Loader2 size={10} className="animate-spin" /> : showThread ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
           {displayReplyCount} {displayReplyCount === 1 ? "reply" : "replies"}
+          {hasNewReplies && !showThread && (
+            <span className="text-[9px] text-red-400 font-semibold">NEW</span>
+          )}
           {!showThread && replyUserNames.length > 0 && (
             <span className="text-muted/60 font-normal">from {replyUserNames.join(", ")}</span>
           )}
@@ -4363,19 +4474,41 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
       )}
 
       {/* Thread replies */}
-      {showThread && replies.length > 0 && (
-        <div className="ml-2 mt-2 border-l-2 border-accent/30 pl-3 space-y-1.5">
-          {replies.map((reply, i) => (
-            <div key={i} className="py-1">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-foreground">{reply.senderName}</span>
-                <span className="text-[10px] text-muted/40">{reply.timestamp ? formatTime(reply.timestamp) : ""}</span>
+      {showThread && replies.length > 0 && (() => {
+        // Find where new replies start (by matching timestamps from newReplies)
+        const newReplyTimestamps = new Set(newReplies.map(r => r.timestamp));
+        let firstNewIdx = -1;
+        if (newReplyTimestamps.size > 0) {
+          for (let i = 0; i < replies.length; i++) {
+            if (newReplyTimestamps.has(replies[i].timestamp)) {
+              firstNewIdx = i;
+              break;
+            }
+          }
+        }
+        return (
+          <div className="ml-2 mt-2 border-l-2 border-accent/30 pl-3 space-y-1.5">
+            {replies.map((reply, i) => (
+              <div key={i}>
+                {firstNewIdx > 0 && i === firstNewIdx && (
+                  <div className="flex items-center gap-2 py-1">
+                    <div className="flex-1 h-px bg-red-500/50" />
+                    <span className="text-[9px] font-semibold text-red-400 uppercase tracking-wider">New</span>
+                    <div className="flex-1 h-px bg-red-500/50" />
+                  </div>
+                )}
+                <div className="py-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-foreground">{reply.senderName}</span>
+                    <span className="text-[10px] text-muted/40">{reply.timestamp ? formatTime(reply.timestamp) : ""}</span>
+                  </div>
+                  <p className="text-xs text-foreground/70 whitespace-pre-wrap leading-relaxed mt-0.5"><SlackText text={reply.text ?? ""} /></p>
+                </div>
               </div>
-              <p className="text-xs text-foreground/70 whitespace-pre-wrap leading-relaxed mt-0.5"><SlackText text={reply.text ?? ""} /></p>
-            </div>
-          ))}
-        </div>
-      )}
+            ))}
+          </div>
+        );
+      })()}
 
       {/* Reply input with suggestions */}
       {showReply && (
