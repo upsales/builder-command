@@ -45,6 +45,17 @@ export async function fetchMyPRs(username: string): Promise<GithubPR[]> {
   return Promise.all(data.items.map((item) => enrichPR(item, false)));
 }
 
+export async function fetchAssignedPRs(username: string): Promise<GithubPR[]> {
+  const { data } = await octokit.search.issuesAndPullRequests({
+    q: `is:pr is:open assignee:${username}`,
+    sort: "updated",
+    order: "desc",
+    per_page: 50,
+  });
+
+  return Promise.all(data.items.map((item) => enrichPR(item, false)));
+}
+
 async function enrichPR(
   item: { number: number; title: string; body?: string | null; html_url: string; repository_url: string; user?: { login: string } | null; state: string; created_at: string; updated_at: string },
   reviewRequested: boolean,

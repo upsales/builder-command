@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getProfile, upsertItem, removeStaleItems, getItems } from "@/lib/items";
 import { fetchAssignedIssues } from "@/lib/integrations/linear";
-import { fetchPRsNeedingReview, fetchMyPRs } from "@/lib/integrations/github";
+import { fetchPRsNeedingReview, fetchMyPRs, fetchAssignedPRs } from "@/lib/integrations/github";
 import { fetchChannelMessages } from "@/lib/integrations/slack";
 import { fetchEvents } from "@/lib/integrations/google-calendar";
 import { notifyChange } from "@/lib/changeNotifier";
@@ -19,11 +19,13 @@ export async function POST(request: Request) {
   let watchedChannels: string[] | undefined;
   let slackLookbackMinutes: number | undefined;
   let activeDmChannelIds: string[] | undefined;
+  let githubMode: "author" | "assignee" | undefined;
   try {
     const body = await request.json();
     watchedChannels = body.watchedChannels;
     slackLookbackMinutes = body.slackLookbackMinutes;
     activeDmChannelIds = body.activeDmChannelIds;
+    githubMode = body.githubMode;
   } catch { /* no body is fine */ }
 
   const encoder = new TextEncoder();
@@ -86,8 +88,11 @@ export async function POST(request: Request) {
             }
             sendItems();
 
-            send("status", { source: "github", state: `${reviewPRs.length} reviews, fetching my PRs...` });
-            const myPRs = await fetchMyPRs(profile.github_username!);
+            const prLabel = githubMode === "assignee" ? "assigned PRs" : "my PRs";
+            send("status", { source: "github", state: `${reviewPRs.length} reviews, fetching ${prLabel}...` });
+            const myPRs = githubMode === "assignee"
+              ? await fetchAssignedPRs(profile.github_username!)
+              : await fetchMyPRs(profile.github_username!);
             for (const pr of myPRs) {
               const sid = `pr-${pr.repo}-${pr.id}`;
               sourceIds.push(sid);
