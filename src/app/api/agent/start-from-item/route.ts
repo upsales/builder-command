@@ -16,8 +16,8 @@ export async function POST(request: NextRequest) {
   const todoId = randomUUID();
   const maxOrder = (db.prepare("SELECT MAX(sort_order) as m FROM daily_todos WHERE date = ?").get(today) as { m: number | null })?.m ?? 0;
   db.prepare(
-    "INSERT INTO daily_todos (id, date, text, sort_order, agent_enabled) VALUES (?, ?, ?, ?, 1)"
-  ).run(todoId, today, prompt.slice(0, 500), maxOrder + 1);
+    "INSERT INTO daily_todos (id, date, text, sort_order, agent_enabled, source, source_id) VALUES (?, ?, ?, ?, 1, ?, ?)"
+  ).run(todoId, today, prompt.slice(0, 500), maxOrder + 1, source ?? null, source_id ?? null);
 
   // If source item provided, set it as in-progress context
   if (source && source_id) {

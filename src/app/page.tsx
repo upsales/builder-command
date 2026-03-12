@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from "react";
-import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, AlertCircle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, LayoutDashboard, Flame, Zap, Trophy, Plus, Trash2, Square, CheckSquare, Play, Pause, EyeOff, Search } from "lucide-react";
+import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, AlertCircle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, LayoutDashboard, Flame, Zap, Trophy, Plus, Trash2, Square, CheckSquare, Play, Pause, EyeOff, Search, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 function useLocalStorage<T>(key: string, defaultValue: T): [T, (v: T | ((prev: T) => T)) => void] {
@@ -139,25 +139,45 @@ const SOURCE_STYLE: Record<string, string> = {
 };
 
 // ─── Custom Actions Menu ──────────────────────────────────────
-function CustomActionsMenu({ source, context, onAction, onAgentAction, size = 12 }: {
+interface CustomAction {
+  id: string;
+  name: string;
+  emoji: string;
+  prompt: string;
+  source: "linear" | "github" | "both";
+  repo?: string; // optional repo filter (e.g. "owner/repo")
+  createTask?: boolean; // if true, creates a todo + triggers agent instead of chat
+}
+
+const DEFAULT_ACTIONS: CustomAction[] = [
+  { id: "1", name: "Summarize", emoji: "📋", prompt: "Summarize this ticket concisely: [{identifier}] {title}\n\n{description}", source: "both" },
+  { id: "2", name: "Plan implementation", emoji: "🛠️", prompt: "Create an implementation plan for: [{identifier}] {title}\n\n{description}", source: "both" },
+];
+
+function CustomActionsMenu({ source, context, onAction, onAgentAction, onCreateTaskAction, size = 12 }: {
   source: "linear" | "github";
   context: Record<string, string>;
   onAction: (prompt: string) => void;
   onAgentAction?: (prompt: string) => void;
+  onCreateTaskAction?: (taskText: string, agentPrompt: string) => void;
   size?: number;
 }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [actions, setActions] = useLocalStorage<{ id: string; name: string; emoji: string; prompt: string; source: "linear" | "github" | "both" }[]>("ui:customActions", [
-    { id: "1", name: "Summarize", emoji: "📋", prompt: "Summarize this ticket concisely: [{identifier}] {title}\n\n{description}", source: "both" },
-    { id: "2", name: "Plan implementation", emoji: "🛠️", prompt: "Create an implementation plan for: [{identifier}] {title}\n\n{description}", source: "both" },
-  ]);
+  const [actions, setActions] = useLocalStorage<CustomAction[]>("ui:customActions", DEFAULT_ACTIONS);
   const [newName, setNewName] = useState("");
   const [newEmoji, setNewEmoji] = useState("⚡");
   const [newPrompt, setNewPrompt] = useState("");
   const [newSource, setNewSource] = useState<"linear" | "github" | "both">("both");
+  const [newRepo, setNewRepo] = useState("");
+  const [newCreateTask, setNewCreateTask] = useState(false);
 
-  const applicable = actions.filter((a) => a.source === "both" || a.source === source);
+  const repo = context.repo ?? "";
+  const applicable = actions.filter((a) => {
+    if (a.source !== "both" && a.source !== source) return false;
+    if (a.repo && a.repo !== repo) return false;
+    return true;
+  });
 
   const fillTemplate = (template: string) => {
     let result = template;
@@ -179,23 +199,40 @@ function CustomActionsMenu({ source, context, onAction, onAgentAction, size = 12
         <Zap size={size} />
       </button>
       {open && (
-        <div className="absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg shadow-xl py-1 min-w-[180px]" onClick={(e) => e.stopPropagation()}>
+        <div className="absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg shadow-xl py-1 min-w-[200px]" onClick={(e) => e.stopPropagation()}>
           {applicable.map((a) => (
             <div key={a.id} className="flex items-center">
-              <button
-                onClick={() => { onAction(fillTemplate(a.prompt)); setOpen(false); }}
-                className="flex-1 text-left px-3 py-1.5 text-xs hover:bg-card-hover transition-colors flex items-center gap-2"
-              >
-                <span>{a.emoji}</span> {a.name}
-              </button>
-              {onAgentAction && !editing && (
+              {a.createTask && onCreateTaskAction ? (
                 <button
-                  onClick={() => { onAgentAction(fillTemplate(a.prompt)); setOpen(false); }}
-                  className="text-purple-400/50 hover:text-purple-400 px-2 text-xs flex items-center gap-0.5"
-                  title="Run with Agent"
+                  onClick={() => {
+                    const taskText = `${a.emoji} ${a.name}: ${context.identifier || context.title}`;
+                    onCreateTaskAction(taskText, fillTemplate(a.prompt));
+                    setOpen(false);
+                  }}
+                  className="flex-1 text-left px-3 py-1.5 text-xs hover:bg-card-hover transition-colors flex items-center gap-2"
+                  title="Creates a task and runs agent"
                 >
-                  <Bot size={10} />
+                  <span>{a.emoji}</span> {a.name}
+                  <Bot size={9} className="text-purple-400/40 ml-auto" />
                 </button>
+              ) : (
+                <>
+                  <button
+                    onClick={() => { onAction(fillTemplate(a.prompt)); setOpen(false); }}
+                    className="flex-1 text-left px-3 py-1.5 text-xs hover:bg-card-hover transition-colors flex items-center gap-2"
+                  >
+                    <span>{a.emoji}</span> {a.name}
+                  </button>
+                  {onAgentAction && !editing && (
+                    <button
+                      onClick={() => { onAgentAction(fillTemplate(a.prompt)); setOpen(false); }}
+                      className="text-purple-400/50 hover:text-purple-400 px-2 text-xs flex items-center gap-0.5"
+                      title="Run with Agent"
+                    >
+                      <Bot size={10} />
+                    </button>
+                  )}
+                </>
               )}
               {editing && (
                 <button onClick={() => setActions(actions.filter((x) => x.id !== a.id))} className="text-red-400/50 hover:text-red-400 px-2 text-xs">×</button>
@@ -213,17 +250,24 @@ function CustomActionsMenu({ source, context, onAction, onAgentAction, size = 12
                   <input value={newEmoji} onChange={(e) => setNewEmoji(e.target.value)} className="w-8 bg-background border border-border rounded px-1 py-0.5 text-xs text-center" placeholder="⚡" />
                   <input value={newName} onChange={(e) => setNewName(e.target.value)} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs" placeholder="Action name" />
                 </div>
-                <textarea value={newPrompt} onChange={(e) => setNewPrompt(e.target.value)} className="w-full bg-background border border-border rounded px-2 py-1 text-xs h-16 resize-none" placeholder="Prompt template... Use {title}, {identifier}, {description}" />
-                <select value={newSource} onChange={(e) => setNewSource(e.target.value as "linear" | "github" | "both")} className="w-full bg-background border border-border rounded px-2 py-0.5 text-xs">
-                  <option value="both">Both Linear & GitHub</option>
-                  <option value="linear">Linear only</option>
-                  <option value="github">GitHub only</option>
-                </select>
+                <textarea value={newPrompt} onChange={(e) => setNewPrompt(e.target.value)} className="w-full bg-background border border-border rounded px-2 py-1 text-xs h-16 resize-none" placeholder="Prompt template... Use {title}, {identifier}, {description}, {repo}" />
+                <div className="flex gap-1">
+                  <select value={newSource} onChange={(e) => setNewSource(e.target.value as "linear" | "github" | "both")} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs">
+                    <option value="both">Both</option>
+                    <option value="linear">Linear</option>
+                    <option value="github">GitHub</option>
+                  </select>
+                  <input value={newRepo} onChange={(e) => setNewRepo(e.target.value)} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs" placeholder="Repo (optional)" />
+                </div>
+                <label className="flex items-center gap-1.5 text-[10px] text-muted cursor-pointer">
+                  <input type="checkbox" checked={newCreateTask} onChange={(e) => setNewCreateTask(e.target.checked)} className="rounded" />
+                  Create task + run agent
+                </label>
                 <div className="flex gap-1">
                   <button onClick={() => {
                     if (!newName.trim() || !newPrompt.trim()) return;
-                    setActions([...actions, { id: String(Date.now()), name: newName, emoji: newEmoji || "⚡", prompt: newPrompt, source: newSource }]);
-                    setNewName(""); setNewEmoji("⚡"); setNewPrompt(""); setNewSource("both");
+                    setActions([...actions, { id: String(Date.now()), name: newName, emoji: newEmoji || "⚡", prompt: newPrompt, source: newSource, repo: newRepo.trim() || undefined, createTask: newCreateTask || undefined }]);
+                    setNewName(""); setNewEmoji("⚡"); setNewPrompt(""); setNewSource("both"); setNewRepo(""); setNewCreateTask(false);
                   }} className="flex-1 px-2 py-1 rounded bg-accent text-white text-xs hover:bg-accent-hover transition-colors">Add</button>
                   <button onClick={() => setEditing(false)} className="px-2 py-1 rounded border border-border text-xs text-muted hover:bg-card-hover transition-colors">Done</button>
                 </div>
@@ -748,7 +792,20 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                   <ChevronLeft size={14} />
                 </button>
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium truncate">{agentSessionData.todoText ?? "Task"}</p>
+                  <button
+                    onClick={() => {
+                      const el = document.getElementById(`todo-${agentSessionData.todo_id}`);
+                      if (el) {
+                        el.scrollIntoView({ behavior: "smooth", block: "center" });
+                        el.classList.add("ring-2", "ring-accent/50", "rounded");
+                        setTimeout(() => el.classList.remove("ring-2", "ring-accent/50", "rounded"), 2000);
+                      }
+                    }}
+                    className="text-xs font-medium truncate hover:text-accent transition-colors text-left w-full"
+                    title="Scroll to task"
+                  >
+                    {agentSessionData.todoText ?? "Task"}
+                  </button>
                   <div className="flex items-center gap-1.5 mt-0.5">
                     {agentSessionData.status === "running" && <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Loader2 size={8} className="animate-spin" /> Running</span>}
                     {agentSessionData.status === "completed" && <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={8} /> Done</span>}
@@ -760,14 +817,15 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
               {/* Chat-style conversation */}
               <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3">
                 {(() => {
-                  // Parse messages into chat bubbles
-                  const chatBubbles: { role: "user" | "agent"; text: string; toolCount?: number }[] = [];
+                  // Parse messages into chat bubbles with inline tool calls
+                  const chatBubbles: { role: "user" | "agent"; text: string; toolNames?: string[] }[] = [];
+                  const allToolCalls = agentSessionData.tool_calls ? JSON.parse(agentSessionData.tool_calls) : [];
+                  let toolCallIndex = 0;
                   if (agentSessionData.messages) {
                     try {
                       const msgs = JSON.parse(agentSessionData.messages);
                       for (const msg of msgs) {
                         if (msg.role === "user") {
-                          // User messages — extract text content, skip tool_result blocks
                           if (typeof msg.content === "string") {
                             chatBubbles.push({ role: "user", text: msg.content });
                           } else if (Array.isArray(msg.content)) {
@@ -779,49 +837,59 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                             }
                           }
                         } else if (msg.role === "assistant") {
-                          // Agent messages — collect text, count tool uses
                           const texts: string[] = [];
-                          let tools = 0;
+                          let toolCount = 0;
                           if (Array.isArray(msg.content)) {
                             for (const block of msg.content) {
                               if (block.type === "text" && block.text?.trim()) texts.push(block.text);
-                              if (block.type === "tool_use") tools++;
+                              if (block.type === "tool_use") toolCount++;
                             }
                           } else if (typeof msg.content === "string" && msg.content.trim()) {
                             texts.push(msg.content);
                           }
+                          // Grab the corresponding tool calls from the log
+                          const msgToolCalls = allToolCalls.slice(toolCallIndex, toolCallIndex + toolCount);
+                          toolCallIndex += toolCount;
+                          const toolNames = msgToolCalls.map((tc: { tool: string }) => tc.tool);
                           if (texts.length > 0) {
-                            chatBubbles.push({ role: "agent", text: texts.join("\n\n"), toolCount: tools || undefined });
-                          } else if (tools > 0) {
-                            // Tool-only message — merge tool count into next/prev agent bubble
-                            const lastAgent = [...chatBubbles].reverse().find(b => b.role === "agent");
-                            if (lastAgent) lastAgent.toolCount = (lastAgent.toolCount ?? 0) + tools;
+                            chatBubbles.push({ role: "agent", text: texts.join("\n\n"), toolNames: toolNames.length > 0 ? toolNames : undefined });
+                          } else if (toolNames.length > 0) {
+                            // Tool-only message — show as its own bubble
+                            chatBubbles.push({ role: "agent", text: "", toolNames });
                           }
                         }
                       }
                     } catch { /* ignore */ }
                   }
-                  // If no parsed messages yet, show summary/failure directly
                   if (chatBubbles.length === 0 && (agentSessionData.summary || agentSessionData.failure_reason)) {
                     chatBubbles.push({ role: "user", text: agentSessionData.todoText ?? "Task" });
                     if (agentSessionData.summary) chatBubbles.push({ role: "agent", text: agentSessionData.summary });
                     if (agentSessionData.failure_reason) chatBubbles.push({ role: "agent", text: agentSessionData.failure_reason });
                   }
-                  const toolCalls = agentSessionData.tool_calls ? JSON.parse(agentSessionData.tool_calls) : [];
                   return (
                     <>
                       {chatBubbles.map((bubble, i) => (
                         <div key={i} className={`flex ${bubble.role === "user" ? "justify-end" : "justify-start"}`}>
-                          <div className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 ${
-                            bubble.role === "user"
-                              ? "bg-accent/15 text-foreground/90 rounded-br-md"
-                              : "bg-card border border-border rounded-bl-md"
-                          }`}>
-                            <div className="text-xs leading-relaxed chat-markdown">
-                              <ReactMarkdown>{bubble.text}</ReactMarkdown>
-                            </div>
-                            {bubble.toolCount && bubble.toolCount > 0 && (
-                              <span className="text-[9px] text-muted/40 mt-1 block">{bubble.toolCount} tool call{bubble.toolCount > 1 ? "s" : ""}</span>
+                          <div className={`max-w-[85%] ${bubble.role === "user" ? "" : "space-y-1.5"}`}>
+                            {(bubble.text || bubble.role === "user") && (
+                              <div className={`rounded-2xl px-3.5 py-2.5 ${
+                                bubble.role === "user"
+                                  ? "bg-accent/15 text-foreground/90 rounded-br-md"
+                                  : "bg-card border border-border rounded-bl-md"
+                              }`}>
+                                <div className="text-xs leading-relaxed chat-markdown">
+                                  <ReactMarkdown>{bubble.text}</ReactMarkdown>
+                                </div>
+                              </div>
+                            )}
+                            {bubble.toolNames && bubble.toolNames.length > 0 && (
+                              <div className="flex flex-wrap gap-1 px-1">
+                                {bubble.toolNames.map((name: string, j: number) => (
+                                  <span key={j} className="inline-flex items-center gap-0.5 text-[9px] text-purple-400/60 bg-purple-500/5 border border-purple-500/10 rounded px-1.5 py-0.5">
+                                    <Wrench size={7} className="shrink-0" />{name}
+                                  </span>
+                                ))}
+                              </div>
                             )}
                           </div>
                         </div>
@@ -835,22 +903,6 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                             </div>
                           </div>
                         </div>
-                      )}
-                      {/* Tool calls — collapsed at bottom */}
-                      {toolCalls.length > 0 && (
-                        <details className="mt-2">
-                          <summary className="text-[10px] text-muted/40 cursor-pointer hover:text-muted/70 transition-colors select-none">
-                            {toolCalls.length} tool call{toolCalls.length > 1 ? "s" : ""}
-                          </summary>
-                          <div className="space-y-1 mt-1.5 pl-2 border-l border-border/30">
-                            {toolCalls.map((tc: { tool: string; result: string; timestamp?: string }, i: number) => (
-                              <div key={i} className="text-[9px] text-muted/50">
-                                <span className="text-purple-400/60 font-medium">{tc.tool}</span>
-                                <span className="text-muted/30"> — {tc.result.slice(0, 120)}{tc.result.length > 120 ? "..." : ""}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </details>
                       )}
                     </>
                   );
@@ -1350,11 +1402,6 @@ export default function Home() {
               <MessageSquare size={12} /> Slack
             </button>
           )}
-          <button onClick={() => handleSync(false)} disabled={syncing}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-accent text-white hover:bg-accent-hover text-[11px] transition-colors disabled:opacity-50">
-            {syncing ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-            Sync
-          </button>
           <button onClick={() => setShowSettings(!showSettings)} className="text-muted hover:text-foreground transition-colors p-1.5 rounded hover:bg-card-hover">
             <Settings size={14} />
           </button>
@@ -1517,7 +1564,99 @@ export default function Home() {
   );
 }
 
+function CustomActionsSettings() {
+  const [actions, setActions] = useLocalStorage<CustomAction[]>("ui:customActions", DEFAULT_ACTIONS);
+  const [adding, setAdding] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [form, setForm] = useState({ name: "", emoji: "⚡", prompt: "", source: "both" as "linear" | "github" | "both", repo: "", createTask: false });
+
+  const startEdit = (a: CustomAction) => {
+    setEditId(a.id);
+    setForm({ name: a.name, emoji: a.emoji, prompt: a.prompt, source: a.source, repo: a.repo ?? "", createTask: a.createTask ?? false });
+  };
+
+  const save = () => {
+    if (!form.name.trim() || !form.prompt.trim()) return;
+    const action: CustomAction = { id: editId ?? String(Date.now()), name: form.name, emoji: form.emoji || "⚡", prompt: form.prompt, source: form.source, repo: form.repo.trim() || undefined, createTask: form.createTask || undefined };
+    if (editId) {
+      setActions(actions.map((a) => a.id === editId ? action : a));
+    } else {
+      setActions([...actions, action]);
+    }
+    setEditId(null);
+    setAdding(false);
+    setForm({ name: "", emoji: "⚡", prompt: "", source: "both", repo: "", createTask: false });
+  };
+
+  return (
+    <div>
+      <h3 className="text-[10px] uppercase tracking-wider text-muted/60 mb-1.5">Custom Actions</h3>
+      <p className="text-[10px] text-muted/40 mb-2">Actions appear on Linear tickets and GitHub PRs. Use template variables: {"{title}"}, {"{identifier}"}, {"{description}"}, {"{repo}"}, {"{state}"}, {"{assignee}"}, {"{labels}"}</p>
+      <div className="space-y-1.5">
+        {actions.map((a) => (
+          editId === a.id ? (
+            <ActionForm key={a.id} form={form} setForm={setForm} onSave={save} onCancel={() => { setEditId(null); setForm({ name: "", emoji: "⚡", prompt: "", source: "both", repo: "", createTask: false }); }} />
+          ) : (
+            <div key={a.id} className="flex items-center gap-2 group/action py-1 px-2 rounded hover:bg-card-hover transition-colors">
+              <span className="text-sm">{a.emoji}</span>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-medium">{a.name}</div>
+                <div className="flex items-center gap-1.5 text-[9px] text-muted/50">
+                  <span className={a.source === "github" ? "text-orange-400/60" : a.source === "linear" ? "text-violet-400/60" : "text-muted/40"}>{a.source}</span>
+                  {a.repo && <span className="font-mono">{a.repo}</span>}
+                  {a.createTask && <span className="text-purple-400/60 flex items-center gap-0.5"><Bot size={7} /> task+agent</span>}
+                </div>
+              </div>
+              <button onClick={() => startEdit(a)} className="opacity-0 group-hover/action:opacity-100 text-[10px] text-accent hover:underline transition-opacity">edit</button>
+              <button onClick={() => setActions(actions.filter((x) => x.id !== a.id))} className="opacity-0 group-hover/action:opacity-100 text-[10px] text-red-400/50 hover:text-red-400 transition-opacity">×</button>
+            </div>
+          )
+        ))}
+        {adding ? (
+          <ActionForm form={form} setForm={setForm} onSave={save} onCancel={() => { setAdding(false); setForm({ name: "", emoji: "⚡", prompt: "", source: "both", repo: "", createTask: false }); }} />
+        ) : (
+          <button onClick={() => setAdding(true)} className="text-[10px] text-accent hover:underline">+ Add action</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ActionForm({ form, setForm, onSave, onCancel }: {
+  form: { name: string; emoji: string; prompt: string; source: "linear" | "github" | "both"; repo: string; createTask: boolean };
+  setForm: (f: typeof form) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="bg-background border border-border rounded-lg p-2.5 space-y-1.5">
+      <div className="flex gap-1">
+        <input value={form.emoji} onChange={(e) => setForm({ ...form, emoji: e.target.value })} className="w-8 bg-card border border-border rounded px-1 py-0.5 text-xs text-center" />
+        <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="flex-1 bg-card border border-border rounded px-2 py-0.5 text-xs" placeholder="Action name (e.g. Review, Test)" />
+      </div>
+      <textarea value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })} className="w-full bg-card border border-border rounded px-2 py-1 text-xs h-20 resize-none font-mono" placeholder="Prompt template..." />
+      <div className="flex gap-1">
+        <select value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value as "linear" | "github" | "both" })} className="flex-1 bg-card border border-border rounded px-2 py-0.5 text-xs">
+          <option value="both">Both</option>
+          <option value="linear">Linear only</option>
+          <option value="github">GitHub only</option>
+        </select>
+        <input value={form.repo} onChange={(e) => setForm({ ...form, repo: e.target.value })} className="flex-1 bg-card border border-border rounded px-2 py-0.5 text-xs font-mono" placeholder="Repo filter (optional)" />
+      </div>
+      <label className="flex items-center gap-1.5 text-[10px] text-muted cursor-pointer">
+        <input type="checkbox" checked={form.createTask} onChange={(e) => setForm({ ...form, createTask: e.target.checked })} className="rounded" />
+        Create task + run agent automatically
+      </label>
+      <div className="flex gap-1">
+        <button onClick={onSave} className="flex-1 px-2 py-1 rounded bg-accent text-white text-xs hover:bg-accent-hover transition-colors">Save</button>
+        <button onClick={onCancel} className="px-2 py-1 rounded border border-border text-xs text-muted hover:bg-card-hover transition-colors">Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function SettingsModal({ onClose }: { onClose: () => void }) {
+  const [tab, setTab] = useState<"general" | "actions">("general");
   const [settings, setSettings] = useState<{ env: Record<string, { set: boolean; preview: string }>; webhooks: Record<string, string> } | null>(null);
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -1559,7 +1698,19 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           <button onClick={onClose} className="text-muted hover:text-foreground"><X size={14} /></button>
         </div>
 
-        {!settings ? (
+        {/* Tabs */}
+        <div className="flex gap-1 mb-4 border-b border-border/50 pb-2">
+          <button onClick={() => setTab("general")} className={`px-3 py-1 rounded-md text-xs transition-colors ${tab === "general" ? "bg-accent/15 text-accent font-medium" : "text-muted hover:text-foreground"}`}>
+            General
+          </button>
+          <button onClick={() => setTab("actions")} className={`px-3 py-1 rounded-md text-xs transition-colors flex items-center gap-1 ${tab === "actions" ? "bg-accent/15 text-accent font-medium" : "text-muted hover:text-foreground"}`}>
+            <Zap size={10} /> Actions
+          </button>
+        </div>
+
+        {tab === "actions" ? (
+          <CustomActionsSettings />
+        ) : !settings ? (
           <div className="flex items-center justify-center py-8 text-muted"><Loader2 size={16} className="animate-spin" /></div>
         ) : (
           <div className="space-y-4">
@@ -2174,6 +2325,7 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
       {undoneTodos.map((todo) => (
         <div
           key={todo.id}
+          id={`todo-${todo.id}`}
           draggable
           onDragStart={() => handleDragStart(todo.id)}
           onDragOver={(e) => handleDragOver(e, todo.id)}
@@ -2209,11 +2361,23 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
           {inProgressTodoId === todo.id && (
             <span className="text-[9px] text-sky-400 font-medium shrink-0 flex items-center gap-0.5"><Play size={8} fill="currentColor" /> In Progress</span>
           )}
-          {todo.source && (
-            <span className={`text-[9px] shrink-0 flex items-center gap-0.5 ${todo.source === "linear" ? "text-violet-400/60" : todo.source === "github" ? "text-orange-400/60" : "text-muted/40"}`}>
+          {todo.source && todo.source_id && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const el = document.getElementById(`item-${todo.source}-${todo.source_id}`);
+                if (el) {
+                  el.scrollIntoView({ behavior: "smooth", block: "center" });
+                  el.classList.add("ring-2", "ring-accent/50", "rounded-lg");
+                  setTimeout(() => el.classList.remove("ring-2", "ring-accent/50", "rounded-lg"), 2000);
+                }
+              }}
+              className={`text-[9px] shrink-0 flex items-center gap-0.5 hover:underline cursor-pointer ${todo.source === "linear" ? "text-violet-400/60 hover:text-violet-400" : todo.source === "github" ? "text-orange-400/60 hover:text-orange-400" : "text-muted/40 hover:text-muted"}`}
+              title={`Scroll to ${todo.source} item`}
+            >
               {todo.source === "linear" ? <CircleDot size={8} /> : todo.source === "github" ? <GitPullRequest size={8} /> : null}
               {todo.source}
-            </span>
+            </button>
           )}
           {todo.date === null && <span className="text-[9px] text-muted/30 shrink-0">persistent</span>}
           {/* Agent session status badge */}
@@ -2339,7 +2503,7 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
           </button>
           {showDone && (<>
             {doneTodos.slice(0, doneLimit).map((todo) => (
-              <div key={todo.id} className="group/todo py-0.5">
+              <div key={todo.id} id={`todo-${todo.id}`} className="group/todo py-0.5">
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => toggleTodo(todo.id, false)}
@@ -2350,6 +2514,15 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
                   <span className="flex-1 text-xs line-through text-muted decoration-muted/30" data-tooltip={todo.note || undefined}>{todo.text}</span>
                   {todo.note && (
                     <span className="text-accent/50 hover:text-accent transition-colors" data-tooltip={todo.note}><MessageSquare size={11} /></span>
+                  )}
+                  {agentSessions?.[todo.id] && onOpenAgentSession && (
+                    <button
+                      onClick={() => onOpenAgentSession(agentSessions[todo.id].id)}
+                      className="text-[9px] text-purple-400/50 hover:text-purple-400 transition-colors flex items-center gap-0.5"
+                      title="View agent session"
+                    >
+                      <Bot size={9} />
+                    </button>
                   )}
                   <button
                     onClick={() => deleteTodo(todo.id)}
@@ -2465,6 +2638,16 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
       body: JSON.stringify({ prompt, source: item.source, source_id: item.source_id }),
     });
   }, [setInProgressKey]);
+
+  const createTaskActionForItem = useCallback((item: TodoItem) => async (taskText: string, agentPrompt: string) => {
+    setInProgressKey(`${item.source}:${item.source_id}`);
+    await fetch("/api/agent/start-from-item", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: `${taskText}\n\n${agentPrompt}`, source: item.source, source_id: item.source_id }),
+    });
+    onRefreshTodos();
+  }, [setInProgressKey, onRefreshTodos]);
 
   const [createTaskModal, setCreateTaskModal] = useState<{ source: string; sourceId: string; defaultText: string } | null>(null);
   const createTaskFromItem = useCallback((source: string, sourceId: string, text: string) => {
@@ -2910,10 +3093,10 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                 {!inProgressCollapsed && <div className="bg-sky-500/5 border border-sky-500/30 rounded-lg relative">
                   <div className="absolute top-0 left-0 w-1 h-full bg-sky-400 rounded-l-lg" />
                   {inProgressItem?.source === "linear" && (
-                    <LinearCard item={inProgressItem} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} onCreateTask={createTaskFromItem} />
+                    <LinearCard item={inProgressItem} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} onCreateTaskAction={createTaskActionForItem(inProgressItem)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} onCreateTask={createTaskFromItem} />
                   )}
                   {inProgressItem?.source === "github" && (
-                    <GithubCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} repoStatus={repoStatuses[(inProgressItem.raw_data ? JSON.parse(inProgressItem.raw_data) : {}).repo]} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} onCreateTask={createTaskFromItem} />
+                    <GithubCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} onCreateTaskAction={createTaskActionForItem(inProgressItem)} repoStatus={repoStatuses[(inProgressItem.raw_data ? JSON.parse(inProgressItem.raw_data) : {}).repo]} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} onCreateTask={createTaskFromItem} />
                   )}
                   {inProgressItem?.source === "calendar" && (
                     <CalendarCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} />
@@ -3065,8 +3248,8 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                 {Array.from(githubByRepo.entries()).map(([repo, repoItems]) => (
                   <CollapsibleGroup key={repo} label={repo} count={repoItems.length} mono defaultOpen nested>
                     {repoItems.map((item) => (
-                      <div key={item.id} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
-                        <GithubCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} onCreateTask={createTaskFromItem} />
+                      <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                        <GithubCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} onCreateTask={createTaskFromItem} />
                       </div>
                     ))}
                   </CollapsibleGroup>
@@ -3095,8 +3278,8 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                   {Array.from(linearGrouped.entries()).map(([group, groupItems]) => (
                     <CollapsibleGroup key={group} label={group} icon={<CircleDot size={10} />} count={groupItems.length} defaultOpen nested>
                       {groupItems.map((item) => (
-                        <div key={item.id} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
-                          <LinearCard item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} onCreateTask={createTaskFromItem} />
+                        <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                          <LinearCard item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} onCreateTask={createTaskFromItem} />
                         </div>
                       ))}
                     </CollapsibleGroup>
@@ -3397,8 +3580,8 @@ function CollapsibleGroup({ label, icon, count, mono, defaultOpen = false, onDis
   );
 }
 
-function ExpandableCard({ item, summary, children, onDismiss, onChatAbout, onAgentAction, isInProgress, onToggleInProgress, onCreateTask }: {
-  item: TodoItem; summary?: React.ReactNode; children: React.ReactNode; onDismiss?: (item: TodoItem) => void; onChatAbout?: (prompt: string) => void; onAgentAction?: (prompt: string) => void; isInProgress?: boolean; onToggleInProgress?: () => void; onCreateTask?: (source: string, sourceId: string, text: string) => void;
+function ExpandableCard({ item, summary, children, onDismiss, onChatAbout, onAgentAction, onCreateTaskAction, isInProgress, onToggleInProgress, onCreateTask }: {
+  item: TodoItem; summary?: React.ReactNode; children: React.ReactNode; onDismiss?: (item: TodoItem) => void; onChatAbout?: (prompt: string) => void; onAgentAction?: (prompt: string) => void; onCreateTaskAction?: (taskText: string, agentPrompt: string) => void; isInProgress?: boolean; onToggleInProgress?: () => void; onCreateTask?: (source: string, sourceId: string, text: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
@@ -3430,7 +3613,7 @@ function ExpandableCard({ item, summary, children, onDismiss, onChatAbout, onAge
           )}
           {onChatAbout && (item.source === "github" || item.source === "linear") && (
             <div onClick={(e) => e.stopPropagation()}>
-              <CustomActionsMenu source={item.source === "github" ? "github" : "linear"} context={{ identifier: raw.identifier ?? item.source_id, title: raw.title ?? item.title ?? "", description: raw.body ?? raw.description ?? "", url: item.url ?? "", state: raw.state ?? "", assignee: raw.assignee ?? "", labels: (raw.labels ?? []).join(", "), repo: raw.repo ?? "", author: raw.author ?? "", pr_number: String(raw.id ?? ""), reviewers: (raw.reviewers ?? []).join(", ") }} onAction={onChatAbout} onAgentAction={onAgentAction} />
+              <CustomActionsMenu source={item.source === "github" ? "github" : "linear"} context={{ identifier: raw.identifier ?? item.source_id, title: raw.title ?? item.title ?? "", description: raw.body ?? raw.description ?? "", url: item.url ?? "", state: raw.state ?? "", assignee: raw.assignee ?? "", labels: (raw.labels ?? []).join(", "), repo: raw.repo ?? "", author: raw.author ?? "", pr_number: String(raw.id ?? ""), reviewers: (raw.reviewers ?? []).join(", ") }} onAction={onChatAbout} onAgentAction={onAgentAction} onCreateTaskAction={onCreateTaskAction} />
             </div>
           )}
         </div>
@@ -3463,13 +3646,14 @@ const STATE_ICONS: Record<string, string> = {
   "Waiting for Customer": "text-yellow-400",
 };
 
-function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentAction, onUpdateItem, hiddenStates, isInProgress, onToggleInProgress, onCreateTask }: {
+function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentAction, onCreateTaskAction, onUpdateItem, hiddenStates, isInProgress, onToggleInProgress, onCreateTask }: {
   item: TodoItem;
   states: { id: string; name: string; type: string }[];
   members: { id: string; name: string; email: string }[];
   onDismiss: (item: TodoItem) => void;
   onChatAbout: (prompt: string) => void;
   onAgentAction?: (prompt: string) => void;
+  onCreateTaskAction?: (taskText: string, agentPrompt: string) => void;
   onUpdateItem: (itemId: string, updates: Record<string, unknown>) => void;
   hiddenStates: Set<string>;
   isInProgress?: boolean;
@@ -3573,7 +3757,7 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentActi
               <ExternalLink size={12} />
             </a>
           )}
-          <CustomActionsMenu source="linear" context={{ identifier: raw.identifier ?? "", title: raw.title ?? "", description: (raw.description ?? "").slice(0, 500), state: raw.state ?? "", assignee: raw.assignee ?? "", project: raw.project ?? "", url: item.url ?? "" }} onAction={(prompt) => onChatAbout(prompt)} onAgentAction={onAgentAction} />
+          <CustomActionsMenu source="linear" context={{ identifier: raw.identifier ?? "", title: raw.title ?? "", description: (raw.description ?? "").slice(0, 500), state: raw.state ?? "", assignee: raw.assignee ?? "", project: raw.project ?? "", url: item.url ?? "" }} onAction={(prompt) => onChatAbout(prompt)} onAgentAction={onAgentAction} onCreateTaskAction={onCreateTaskAction} />
         </div>
       </div>
 
@@ -3691,7 +3875,7 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentActi
   );
 }
 
-function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, repoStatus, isInProgress, onToggleInProgress, onCreateTask }: { item: TodoItem; onDismiss: (item: TodoItem) => void; onChatAbout: (prompt: string, prInfo?: { repo: string; prNumber: number }) => void; onAgentAction?: (prompt: string) => void; repoStatus?: string; isInProgress?: boolean; onToggleInProgress?: () => void; onCreateTask?: (source: string, sourceId: string, text: string) => void }) {
+function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, onCreateTaskAction, repoStatus, isInProgress, onToggleInProgress, onCreateTask }: { item: TodoItem; onDismiss: (item: TodoItem) => void; onChatAbout: (prompt: string, prInfo?: { repo: string; prNumber: number }) => void; onAgentAction?: (prompt: string) => void; onCreateTaskAction?: (taskText: string, agentPrompt: string) => void; repoStatus?: string; isInProgress?: boolean; onToggleInProgress?: () => void; onCreateTask?: (source: string, sourceId: string, text: string) => void }) {
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   const [merging, setMerging] = useState(false);
   const [mergeResult, setMergeResult] = useState<string | null>(null);
@@ -3796,7 +3980,7 @@ function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, repoStatus, i
   };
 
   return (
-    <ExpandableCard item={item} onDismiss={onDismiss} onChatAbout={onChatAbout} onAgentAction={onAgentAction} isInProgress={isInProgress} onToggleInProgress={onToggleInProgress} onCreateTask={onCreateTask} summary={
+    <ExpandableCard item={item} onDismiss={onDismiss} onChatAbout={onChatAbout} onAgentAction={onAgentAction} onCreateTaskAction={onCreateTaskAction} isInProgress={isInProgress} onToggleInProgress={onToggleInProgress} onCreateTask={onCreateTask} summary={
       <>
         {raw.author && <span className="text-[11px] text-muted flex items-center gap-1"><User size={10} /> {raw.author}</span>}
         {raw.reviewRequested && <span className="text-[11px] text-accent flex items-center gap-1"><GitPullRequest size={10} /> review requested</span>}
