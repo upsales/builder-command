@@ -9,6 +9,7 @@ const g = globalThis as unknown as {
   __slackSocketClient?: SocketModeClient | null;
   __slackSocketStarted?: boolean;
   __slackSocketLog?: SlackSocketEvent[];
+  __slackReadStateInterval?: ReturnType<typeof setInterval> | null;
 };
 
 function getSocketClient() { return g.__slackSocketClient ?? null; }
@@ -98,6 +99,99 @@ async function resolveUserMentions(webClient: WebClient, text: string): Promise<
     }
   }
   return result;
+}
+
+const READ_STATE_POLL_INTERVAL = 15_000; // 15 seconds
+
+/**
+ * Poll Slack for read-state changes on channels we have items for.
+ * Handles both directions: reading in Slack → remove from Builder,
+ * and marking unread in Slack → show in Builder.
+ */
+async function pollReadState(webClient: WebClient): Promise<void> {
+  const db = getDb();
+  // Get all non-dismissed slack items with their raw_data
+  const items = db.prepare(
+    `SELECT i.id, i.source_id, i.raw_data FROM items i
+     LEFT JOIN dismissed d ON d.source = i.source AND d.source_id = i.source_id
+     WHERE i.source = 'slack' AND d.source IS NULL AND i.raw_data IS NOT NULL`
+  ).all() as { id: string; source_id: string; raw_data: string }[];
+
+  if (items.length === 0) return;
+
+  // Group items by channel
+  const byChannel = new Map<string, { id: string; source_id: string; raw: Record<string, unknown>; ts: string }[]>();
+  for (const item of items) {
+    try {
+      const raw = JSON.parse(item.raw_data);
+      const channelId = raw.channel as string;
+      const ts = raw.timestamp as string;
+      if (!channelId || !ts) continue;
+      if (!byChannel.has(channelId)) byChannel.set(channelId, []);
+      byChannel.get(channelId)!.push({ id: item.id, source_id: item.source_id, raw, ts });
+    } catch { /* skip malformed */ }
+  }
+
+  let changed = false;
+  const channelIds = [...byChannel.keys()];
+
+  // Batch conversations.info calls (10 at a time for rate limits)
+  for (let i = 0; i < channelIds.length; i += 10) {
+    const batch = channelIds.slice(i, i + 10);
+    const results = await Promise.all(
+      batch.map(async (chId) => {
+        try {
+          const info = await webClient.conversations.info({ channel: chId });
+          const c = info.channel as Record<string, unknown>;
+          const lastRead = c?.last_read as string;
+          return lastRead ? { chId, lastRead } : null;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    for (const result of results) {
+      if (!result) continue;
+      const channelItems = byChannel.get(result.chId);
+      if (!channelItems) continue;
+
+      for (const item of channelItems) {
+        const shouldBeUnread = parseFloat(item.ts) > parseFloat(result.lastRead);
+        const currentlyUnread = !!item.raw.isUnread;
+
+        if (shouldBeUnread !== currentlyUnread) {
+          item.raw.isUnread = shouldBeUnread;
+          db.prepare("UPDATE items SET raw_data = ? WHERE id = ?")
+            .run(JSON.stringify(item.raw), item.id);
+          changed = true;
+          logEvent("read_sync", `${item.source_id} ${currentlyUnread ? "read" : "unread"} (last_read=${result.lastRead})`);
+        }
+      }
+    }
+  }
+
+  if (changed) {
+    logEvent("read_sync", "Read state changed, notifying UI");
+    notifyChange();
+  }
+}
+
+function startReadStatePolling(webClient: WebClient): void {
+  stopReadStatePolling();
+  logEvent("read_sync", "Starting read-state polling (15s interval)");
+  g.__slackReadStateInterval = setInterval(() => {
+    pollReadState(webClient).catch((err) => {
+      logEvent("error", `Read-state poll failed: ${err instanceof Error ? err.message : err}`);
+    });
+  }, READ_STATE_POLL_INTERVAL);
+}
+
+function stopReadStatePolling(): void {
+  if (g.__slackReadStateInterval) {
+    clearInterval(g.__slackReadStateInterval);
+    g.__slackReadStateInterval = null;
+  }
 }
 
 export function startSlackSocket(): void {
@@ -291,6 +385,7 @@ export function startSlackSocket(): void {
   socketClient.on("connected" as string, () => {
     logEvent("connected", "Socket Mode connected to Slack");
     console.log("[slack-socket] Connected to Slack via Socket Mode");
+    startReadStatePolling(webClient);
   });
   socketClient.on("authenticated" as string, (data: unknown) => {
     logEvent("auth", `Authenticated: ${JSON.stringify(data).slice(0, 200)}`);
@@ -299,6 +394,7 @@ export function startSlackSocket(): void {
   socketClient.on("disconnected" as string, () => {
     logEvent("disconnected", "Socket Mode disconnected");
     console.log("[slack-socket] Disconnected from Slack");
+    stopReadStatePolling();
   });
   socketClient.on("reconnecting" as string, () => {
     logEvent("reconnecting", "Socket Mode reconnecting...");
@@ -331,6 +427,7 @@ export function isSlackSocketRunning(): boolean {
 }
 
 export function restartSlackSocket(): void {
+  stopReadStatePolling();
   const client = getSocketClient();
   if (client) {
     try { client.disconnect(); } catch { /* ignore */ }
