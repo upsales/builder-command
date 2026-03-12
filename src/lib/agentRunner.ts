@@ -142,10 +142,10 @@ async function processTask(todo: { id: string; text: string }) {
 You are an autonomous AI agent. You've been assigned a specific task to complete.
 
 RULES:
-1. First, write a 1-2 sentence PLAN of what you'll do
-2. Execute using tools
-3. End with a clear **SUMMARY:** section describing what you accomplished or found
-4. If you CANNOT complete the task, clearly state WHY
+1. Write a 1-sentence PLAN, then execute using tools
+2. Be CONCISE and DENSE — no filler, no fluff, no verbose explanations
+3. End with a **SUMMARY:** section — bullet points preferred, keep it tight
+4. If you CANNOT complete the task, state WHY in one sentence
 5. Be efficient — minimum tool calls needed
 6. NEVER use the complete_todo tool. The user will review your work and decide when to mark it done.
 
@@ -158,8 +158,9 @@ TASK: "${todo.text}"`;
     allMessages.push(userMessage);
 
     let currentMessages = [...allMessages];
-    let maxRounds = 10;
+    let maxRounds = 15;
     let finalText = "";
+    let exhaustedRounds = false;
 
     while (maxRounds > 0) {
       maxRounds--;
@@ -206,6 +207,11 @@ TASK: "${todo.text}"`;
       }
 
       if (!hasToolUse || response.stop_reason !== "tool_use") {
+        // Save final assistant response to messages
+        currentMessages = [
+          ...currentMessages,
+          { role: "assistant" as const, content: response.content },
+        ];
         break;
       }
 
@@ -228,28 +234,35 @@ TASK: "${todo.text}"`;
         sessionId
       );
       notifyChange();
+
+      if (maxRounds === 0) {
+        exhaustedRounds = true;
+      }
     }
 
     // Extract summary from final text
     const summary = extractSummary(finalText);
 
-    // Update session as completed
+    // If agent ran out of rounds, mark as incomplete (not truly "completed")
+    const finalStatus = exhaustedRounds ? "incomplete" : "completed";
+
     db.prepare(
       `UPDATE agent_sessions SET
-        status = 'completed',
+        status = ?,
         summary = ?,
         tool_calls = ?,
         messages = ?,
         completed_at = datetime('now')
       WHERE id = ?`
     ).run(
-      summary,
+      finalStatus,
+      summary || (exhaustedRounds ? "Agent ran out of rounds before finishing. You can continue the session." : null),
       JSON.stringify(toolCallsLog),
       JSON.stringify(currentMessages),
       sessionId
     );
 
-    console.log(`[AgentRunner] Task completed: "${todo.text}"`);
+    console.log(`[AgentRunner] Task ${finalStatus}: "${todo.text}"`);
   } catch (e) {
     const errorMsg = e instanceof Error ? e.message : String(e);
     console.error(`[AgentRunner] Task failed: "${todo.text}" - ${errorMsg}`);
@@ -311,10 +324,11 @@ You are an autonomous AI agent continuing work on a task. The user has sent a fo
 RULES:
 1. Consider the previous conversation context
 2. Execute the follow-up request using tools
-3. End with a clear **SUMMARY:** section describing what you accomplished
-4. If you CANNOT complete the request, clearly state WHY
-5. Be efficient — minimum tool calls needed
-6. NEVER use the complete_todo tool
+3. Be CONCISE and DENSE — no filler, bullet points preferred
+4. End with a **SUMMARY:** section — keep it tight
+5. If you CANNOT complete the request, state WHY in one sentence
+6. Be efficient — minimum tool calls needed
+7. NEVER use the complete_todo tool
 
 ORIGINAL TASK: "${taskText}"`;
 
@@ -324,8 +338,9 @@ ORIGINAL TASK: "${taskText}"`;
       { role: "user", content: followUpText },
     ];
 
-    let maxRounds = 10;
+    let maxRounds = 15;
     let finalText = "";
+    let exhaustedRounds = false;
 
     while (maxRounds > 0) {
       maxRounds--;
@@ -359,7 +374,10 @@ ORIGINAL TASK: "${taskText}"`;
         }
       }
 
-      if (!hasToolUse || response.stop_reason !== "tool_use") break;
+      if (!hasToolUse || response.stop_reason !== "tool_use") {
+        currentMessages.push({ role: "assistant" as const, content: response.content });
+        break;
+      }
 
       currentMessages.push(
         { role: "assistant" as const, content: response.content },
@@ -369,12 +387,15 @@ ORIGINAL TASK: "${taskText}"`;
       db.prepare("UPDATE agent_sessions SET tool_calls = ?, messages = ? WHERE id = ?")
         .run(JSON.stringify(toolCallsLog), JSON.stringify(currentMessages), sessionId);
       notifyChange();
+
+      if (maxRounds === 0) exhaustedRounds = true;
     }
 
     const summary = extractSummary(finalText);
+    const finalStatus = exhaustedRounds ? "incomplete" : "completed";
     db.prepare(
-      `UPDATE agent_sessions SET status = 'completed', summary = ?, tool_calls = ?, messages = ?, completed_at = datetime('now') WHERE id = ?`
-    ).run(summary, JSON.stringify(toolCallsLog), JSON.stringify(currentMessages), sessionId);
+      `UPDATE agent_sessions SET status = ?, summary = ?, tool_calls = ?, messages = ?, completed_at = datetime('now') WHERE id = ?`
+    ).run(finalStatus, summary || (exhaustedRounds ? "Agent ran out of rounds. You can continue the session." : null), JSON.stringify(toolCallsLog), JSON.stringify(currentMessages), sessionId);
 
     processing = false;
     currentTodoId = null;

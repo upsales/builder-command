@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Builder Agent",
+  title: "Builder Command",
   description: "Your AI-powered command center for work",
 };
 

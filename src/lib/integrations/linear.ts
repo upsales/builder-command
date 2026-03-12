@@ -58,12 +58,11 @@ export async function fetchAssignedIssues(email: string): Promise<LinearItem[]> 
     const relations = await issue.relations();
     const attachments = await issue.attachments();
 
-    // Get initiative from project
+    // Get initiative from project's parent initiatives
     let initiative: string | null = null;
     if (project) {
       try {
-        // Projects can belong to initiatives (roadmaps)
-        const projectInitiatives = await project.projectMilestones();
+        const projectInitiatives = await project.initiatives();
         if (projectInitiatives.nodes.length > 0) {
           initiative = projectInitiatives.nodes[0].name;
         }
@@ -158,6 +157,17 @@ export async function fetchIssueByIdentifier(identifier: string): Promise<Linear
   const labels = await node.labels();
   const project = await node.project;
   const attachments = await node.attachments();
+
+  let initiative: string | null = null;
+  if (project) {
+    try {
+      const projectInitiatives = await project.initiatives();
+      if (projectInitiatives.nodes.length > 0) {
+        initiative = projectInitiatives.nodes[0].name;
+      }
+    } catch { /* ok */ }
+  }
+
   return {
     id: node.id,
     identifier: node.identifier,
@@ -173,7 +183,7 @@ export async function fetchIssueByIdentifier(identifier: string): Promise<Linear
     createdAt: node.createdAt.toISOString(),
     updatedAt: node.updatedAt.toISOString(),
     project: project?.name ?? null,
-    initiative: null,
+    initiative,
     branchName: node.branchName ?? null,
     relations: [],
     attachments: attachments.nodes.map((a) => ({ title: a.title, url: a.url, sourceType: a.sourceType ?? undefined })),

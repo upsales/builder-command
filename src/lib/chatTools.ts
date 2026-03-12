@@ -5,6 +5,7 @@ import { mergePR, enableAutoMerge, addReviewer } from "@/lib/integrations/github
 import { updateIssueState, updateIssueAssignee } from "@/lib/integrations/linear";
 import { sendReply, addReaction } from "@/lib/integrations/slack";
 import { searchRepo, readRepoFile, listRepoFiles, ensureRepo } from "@/lib/repo-cache";
+import { browse, click, type as browserType, screenshot } from "@/lib/browser";
 import { readFileSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { execSync } from "child_process";
@@ -162,11 +163,11 @@ export const tools: Anthropic.Tool[] = [
   },
   {
     name: "read_file",
-    description: "Read a specific file from a cloned GitHub repository. Use repo='self' to read Builder Agent's own source code.",
+    description: "Read a specific file from a cloned GitHub repository. Use repo='self' to read Builder Command's own source code.",
     input_schema: {
       type: "object" as const,
       properties: {
-        repo: { type: "string", description: "Repository in owner/name format, or 'self' for Builder Agent codebase" },
+        repo: { type: "string", description: "Repository in owner/name format, or 'self' for Builder Command codebase" },
         path: { type: "string", description: "File path within the repo" },
         branch: { type: "string", description: "Git ref (default: HEAD)" },
       },
@@ -239,6 +240,26 @@ Example endpoints:
         accept: { type: "string", description: "Accept header override (e.g. 'application/vnd.github.diff' for PR diffs)" },
       },
       required: ["url"],
+    },
+  },
+  {
+    name: "browse_web",
+    description: `Browse a website using a real browser (Playwright). Unlike web_fetch, this renders JavaScript and returns the fully-rendered page content plus a screenshot. Use this for SPAs, dashboards, or any site that needs JS to load.
+
+Actions:
+- "navigate": Go to a URL, wait for JS to render, return text + screenshot + links
+- "click": Click a link/button by CSS selector or visible text
+- "type": Type text into an input field
+- "screenshot": Take a screenshot of the current page`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        action: { type: "string", enum: ["navigate", "click", "type", "screenshot"], description: "Browser action to perform" },
+        url: { type: "string", description: "URL to navigate to (for 'navigate' action)" },
+        selector: { type: "string", description: "CSS selector or visible text to click/type into (for 'click' and 'type' actions)" },
+        text: { type: "string", description: "Text to type (for 'type' action)" },
+      },
+      required: ["action"],
     },
   },
 ];
@@ -411,6 +432,32 @@ export async function executeTool(name: string, input: Record<string, unknown>):
         if (text.length > maxLen) text = text.slice(0, maxLen) + `\n\n... [truncated, ${text.length} chars total]`;
         return `HTTP ${resp.status}\n${text}`;
       }
+      case "browse_web": {
+        const action = input.action as string;
+        switch (action) {
+          case "navigate": {
+            const result = await browse(input.url as string);
+            const textPreview = result.text.length > 8000 ? result.text.slice(0, 8000) + "\n... (truncated)" : result.text;
+            const linksText = result.links.slice(0, 30).map(l => `- [${l.text}](${l.href})`).join("\n");
+            return `Page: ${result.title}\nURL: ${result.url}\n\n--- Page Text ---\n${textPreview}\n\n--- Links ---\n${linksText}\n\n[Screenshot attached as image]`;
+          }
+          case "click": {
+            const result = await click(input.selector as string);
+            const textPreview = result.text.length > 8000 ? result.text.slice(0, 8000) + "\n... (truncated)" : result.text;
+            return `Clicked. Now on: ${result.title} (${result.url})\n\n--- Page Text ---\n${textPreview}\n\n[Screenshot attached as image]`;
+          }
+          case "type": {
+            const result = await browserType(input.selector as string, input.text as string);
+            return result;
+          }
+          case "screenshot": {
+            const result = await screenshot();
+            return `Screenshot of ${result.title} (${result.url}) [attached as image]`;
+          }
+          default:
+            return `Unknown browse action: ${action}`;
+        }
+      }
       default:
         return `Unknown tool: ${name}`;
     }
@@ -492,10 +539,10 @@ export function buildSystemPrompt(codeContext?: { repo: string; prNumber?: numbe
 
   const todoContext = todos.map((t) => `- id="${t.id}" [${t.done ? "x" : " "}] ${t.text}${t.date ? "" : " (persistent)"}`).join("\n");
 
-  let systemPrompt = `You are a powerful work assistant embedded in "Builder Agent". You can see all the user's work items AND take actions on their behalf using tools. Be proactive — if the user asks you to do something, DO it with tools rather than just describing how.
+  let systemPrompt = `You are a powerful work assistant embedded in "Builder Command". You can see all the user's work items AND take actions on their behalf using tools. Be proactive — if the user asks you to do something, DO it with tools rather than just describing how.
 
 ## Your Capabilities
-You can: dismiss/snooze items, merge PRs, enable auto-merge, request reviewers, change Linear status, assign Linear issues, reply in Slack, react to Slack messages, create/complete todos, search/read code from GitHub repos, browse the web (fetch any URL), and call Linear and GitHub APIs directly with auto-auth via api_fetch (use this to look up issue details, PR reviews, comments, etc.).
+You can: dismiss/snooze items, merge PRs, enable auto-merge, request reviewers, change Linear status, assign Linear issues, reply in Slack, react to Slack messages, create/complete todos, search/read code from GitHub repos, browse the web (fetch any URL), browse websites with a real browser via browse_web (renders JavaScript, takes screenshots — use this for SPAs and dashboards), and call Linear and GitHub APIs directly with auto-auth via api_fetch (use this to look up issue details, PR reviews, comments, etc.).
 
 ## Current Work Items
 
@@ -523,7 +570,7 @@ ${conversationContext}
 - When dismissing/snoozing, use the source and source_id from the item context above.
 - For Slack replies, use the channel ID and thread_ts from the item context. Match the user's communication style.
 - When the user asks about code, clone the repo first if needed, then search/read files.
-- **Builder Agent codebase**: This app's own code lives at ${process.cwd()}. If the user asks about how Builder Agent works, use read_file to explore the codebase. Key paths: src/app/page.tsx (UI), src/lib/ (backend logic), src/app/api/ (API routes).
+- **Builder Command codebase**: This app's own code lives at ${process.cwd()}. If the user asks about how Builder Command works, use read_file to explore the codebase. Key paths: src/app/page.tsx (UI), src/lib/ (backend logic), src/app/api/ (API routes).
 - **Be extremely concise.** 1-3 sentences max unless the user asks for detail. No fluff, no preamble, no restating what they said. Lead with the answer or action. Use bullet points for lists, not paragraphs.
 - When code context is provided, you have the actual source code — reference specific files and lines.`;
 

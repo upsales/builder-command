@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from "react";
-import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, LayoutDashboard, Flame, Zap, Trophy, Plus, Trash2, Square, CheckSquare, Play, Pause } from "lucide-react";
+import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, AlertCircle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, LayoutDashboard, Flame, Zap, Trophy, Plus, Trash2, Square, CheckSquare, Play, Pause, EyeOff, Search } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 function useLocalStorage<T>(key: string, defaultValue: T): [T, (v: T | ((prev: T) => T)) => void] {
@@ -370,6 +370,47 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+  const [chatSessionList, setChatSessionList] = useState<{ id: string; title: string; updated_at: string }[]>([]);
+  const [showChatSessions, setShowChatSessions] = useState(false);
+
+  // Load chat sessions list
+  useEffect(() => {
+    if (chatTab !== "chat") return;
+    fetch("/api/chat/sessions").then(r => r.json()).then(setChatSessionList).catch(() => {});
+  }, [chatTab, messages.length]);
+
+  // Auto-save chat session after each assistant message
+  useEffect(() => {
+    if (messages.length < 2 || streaming) return;
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg.role !== "assistant") return;
+    const title = messages.find(m => m.role === "user")?.content?.slice(0, 60) ?? "Chat";
+    fetch("/api/chat/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: chatSessionId, title, messages }),
+    }).then(r => r.json()).then(data => {
+      if (data.id && !chatSessionId) setChatSessionId(data.id);
+    }).catch(() => {});
+  }, [messages, streaming, chatSessionId]);
+
+  const loadChatSession = useCallback(async (sessionId: string) => {
+    const res = await fetch(`/api/chat/sessions?id=${sessionId}`);
+    const data = await res.json();
+    if (data?.messages) {
+      setMessages(typeof data.messages === "string" ? JSON.parse(data.messages) : data.messages);
+      setChatSessionId(sessionId);
+      setShowChatSessions(false);
+    }
+  }, []);
+
+  const newChatSession = useCallback(() => {
+    setMessages([]);
+    setChatSessionId(null);
+    setShowChatSessions(false);
+    codeSessionIdRef.current = null;
+  }, []);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -460,7 +501,8 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                   streamingTextRef.current += `\n> *${label}*\n`;
                   setStreamingText(streamingTextRef.current);
                 } else if (data.status === "done") {
-                  streamingTextRef.current += `> ✓ ${data.result}\n\n`;
+                  // Show tool name with check, collapse full result
+                  streamingTextRef.current += `> ✓ ${data.tool}\n\n`;
                   setStreamingText(streamingTextRef.current);
                 } else {
                   // Agent SDK tool events (no status field)
@@ -554,13 +596,22 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
           </button>
         </div>
         {chatTab === "chat" && (
-          <span className="text-[10px] text-muted bg-card-hover px-1.5 py-0.5 rounded">context-aware</span>
+          <div className="flex items-center gap-1.5 flex-1 justify-end">
+            {messages.length > 0 && (
+              <button onClick={newChatSession} className="text-[10px] text-muted hover:text-foreground transition-colors flex items-center gap-0.5 px-1.5 py-0.5 rounded hover:bg-card-hover">
+                <Plus size={9} /> New
+              </button>
+            )}
+            <button onClick={() => { const next = !showChatSessions; setShowChatSessions(next); if (next) fetch("/api/chat/sessions").then(r => r.json()).then(setChatSessionList).catch(() => {}); }} className={`text-[10px] transition-colors flex items-center gap-0.5 px-1.5 py-0.5 rounded ${showChatSessions ? "text-accent bg-accent/10" : "text-muted hover:text-foreground hover:bg-card-hover"}`}>
+              <Clock size={9} /> History
+            </button>
+          </div>
         )}
       </div>
 
       {/* Chat tab */}
       {chatTab === "chat" && (<>
-        <div ref={messagesContainerRef} onScroll={checkIfNearBottom} className="flex-1 overflow-y-auto px-4 py-4 space-y-4 min-h-0">
+        <div ref={messagesContainerRef} onScroll={checkIfNearBottom} className="flex-1 overflow-y-auto px-4 py-4 space-y-4 min-h-0 relative">
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-center space-y-3">
               <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-accent/20 to-violet-500/20 flex items-center justify-center">
@@ -580,6 +631,40 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                     {q}
                   </button>
                 ))}
+              {/* Recent sessions */}
+              {chatSessionList.length > 0 && (
+                <div className="mt-4 w-full max-w-[300px]">
+                  <p className="text-[10px] text-muted/50 uppercase tracking-wider mb-1.5">Recent chats</p>
+                  <div className="space-y-1">
+                    {chatSessionList.slice(0, 5).map(s => (
+                      <button key={s.id} onClick={() => loadChatSession(s.id)} className="w-full text-left px-2.5 py-1.5 rounded-lg bg-card border border-border hover:bg-card-hover hover:border-accent/30 transition-all text-xs truncate flex items-center gap-2">
+                        <MessageSquare size={10} className="text-muted/40 shrink-0" />
+                        <span className="truncate">{s.title}</span>
+                        <span className="text-[9px] text-muted/30 shrink-0">{new Date(s.updated_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              </div>
+            </div>
+          )}
+          {/* Session history overlay */}
+          {showChatSessions && (
+            <div className="absolute inset-0 bg-background/95 z-10 overflow-y-auto px-4 py-4">
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-xs font-medium">Chat History</p>
+                <button onClick={() => setShowChatSessions(false)} className="text-muted hover:text-foreground transition-colors"><X size={14} /></button>
+              </div>
+              <div className="space-y-1">
+                {chatSessionList.map(s => (
+                  <button key={s.id} onClick={() => loadChatSession(s.id)} className="w-full text-left px-3 py-2 rounded-lg bg-card border border-border hover:bg-card-hover hover:border-accent/30 transition-all text-xs flex items-center gap-2">
+                    <MessageSquare size={11} className="text-muted/40 shrink-0" />
+                    <span className="truncate flex-1">{s.title}</span>
+                    <span className="text-[9px] text-muted/30 shrink-0">{new Date(s.updated_at).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                  </button>
+                ))}
+                {chatSessionList.length === 0 && <p className="text-xs text-muted/50 text-center py-4">No saved chats yet</p>}
               </div>
             </div>
           )}
@@ -666,83 +751,109 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                   <p className="text-xs font-medium truncate">{agentSessionData.todoText ?? "Task"}</p>
                   <div className="flex items-center gap-1.5 mt-0.5">
                     {agentSessionData.status === "running" && <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Loader2 size={8} className="animate-spin" /> Running</span>}
-                    {agentSessionData.status === "completed" && <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={8} /> Completed</span>}
+                    {agentSessionData.status === "completed" && <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={8} /> Done</span>}
                     {agentSessionData.status === "failed" && <span className="text-[9px] text-red-400 flex items-center gap-0.5"><XCircle size={8} /> Failed</span>}
                     {agentSessionData.started_at && <span className="text-[9px] text-muted/40">{new Date(agentSessionData.started_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}</span>}
                   </div>
                 </div>
               </div>
-              {/* Session content — tool calls and summary */}
-              <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-                {/* Summary */}
-                {agentSessionData.summary && (
-                  <div className="bg-purple-500/5 border border-purple-500/20 rounded-lg p-3">
-                    <h4 className="text-[10px] font-semibold text-purple-400 uppercase tracking-wide mb-1.5">Summary</h4>
-                    <div className="text-sm text-foreground/80 leading-relaxed chat-markdown">
-                      <ReactMarkdown>{agentSessionData.summary}</ReactMarkdown>
-                    </div>
-                  </div>
-                )}
-                {agentSessionData.failure_reason && (
-                  <div className="bg-red-500/5 border border-red-500/20 rounded-lg p-3">
-                    <h4 className="text-[10px] font-semibold text-red-400 uppercase tracking-wide mb-1.5">Failed</h4>
-                    <p className="text-sm text-red-400/80 leading-relaxed">{agentSessionData.failure_reason}</p>
-                  </div>
-                )}
-                {/* Tool calls log — collapsed by default */}
-                {agentSessionData.tool_calls && (() => {
-                  const calls = JSON.parse(agentSessionData.tool_calls);
-                  return calls.length > 0 ? (
-                    <details>
-                      <summary className="text-[10px] font-semibold text-muted uppercase tracking-wide cursor-pointer hover:text-foreground transition-colors select-none">
-                        Tool Calls ({calls.length})
-                      </summary>
-                      <div className="space-y-1.5 mt-1.5">
-                        {calls.map((tc: { tool: string; input: unknown; result: string; timestamp?: string }, i: number) => (
-                          <div key={i} className="bg-card border border-border rounded-lg p-2.5">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-[10px] font-semibold text-purple-400">{tc.tool}</span>
-                              <span className="text-[9px] text-muted/40">#{i + 1}</span>
-                              {tc.timestamp && <span className="text-[9px] text-muted/30 ml-auto">{new Date(tc.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}</span>}
-                            </div>
-                            {tc.input && (
-                              <pre className="text-[10px] text-muted/60 bg-background rounded p-1.5 overflow-x-auto mb-1 max-h-20 overflow-y-auto">{JSON.stringify(tc.input, null, 2)}</pre>
-                            )}
-                            <p className="text-[11px] text-muted/70 whitespace-pre-wrap">{tc.result}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  ) : null;
-                })()}
-                {/* Full messages */}
-                {agentSessionData.messages && (() => {
-                  try {
-                    const msgs = JSON.parse(agentSessionData.messages);
-                    const textBlocks: { role: string; text: string }[] = [];
-                    for (const msg of msgs) {
-                      if (typeof msg.content === "string") {
-                        textBlocks.push({ role: msg.role, text: msg.content });
-                      } else if (Array.isArray(msg.content)) {
-                        for (const block of msg.content) {
-                          if (block.type === "text") textBlocks.push({ role: msg.role, text: block.text });
+              {/* Chat-style conversation */}
+              <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3">
+                {(() => {
+                  // Parse messages into chat bubbles
+                  const chatBubbles: { role: "user" | "agent"; text: string; toolCount?: number }[] = [];
+                  if (agentSessionData.messages) {
+                    try {
+                      const msgs = JSON.parse(agentSessionData.messages);
+                      for (const msg of msgs) {
+                        if (msg.role === "user") {
+                          // User messages — extract text content, skip tool_result blocks
+                          if (typeof msg.content === "string") {
+                            chatBubbles.push({ role: "user", text: msg.content });
+                          } else if (Array.isArray(msg.content)) {
+                            const hasToolResults = msg.content.some((b: { type: string }) => b.type === "tool_result");
+                            if (!hasToolResults) {
+                              for (const block of msg.content) {
+                                if (block.type === "text") chatBubbles.push({ role: "user", text: block.text });
+                              }
+                            }
+                          }
+                        } else if (msg.role === "assistant") {
+                          // Agent messages — collect text, count tool uses
+                          const texts: string[] = [];
+                          let tools = 0;
+                          if (Array.isArray(msg.content)) {
+                            for (const block of msg.content) {
+                              if (block.type === "text" && block.text?.trim()) texts.push(block.text);
+                              if (block.type === "tool_use") tools++;
+                            }
+                          } else if (typeof msg.content === "string" && msg.content.trim()) {
+                            texts.push(msg.content);
+                          }
+                          if (texts.length > 0) {
+                            chatBubbles.push({ role: "agent", text: texts.join("\n\n"), toolCount: tools || undefined });
+                          } else if (tools > 0) {
+                            // Tool-only message — merge tool count into next/prev agent bubble
+                            const lastAgent = [...chatBubbles].reverse().find(b => b.role === "agent");
+                            if (lastAgent) lastAgent.toolCount = (lastAgent.toolCount ?? 0) + tools;
+                          }
                         }
                       }
-                    }
-                    return textBlocks.length > 0 ? (
-                      <div>
-                        <h4 className="text-[10px] font-semibold text-muted uppercase tracking-wide mb-1.5">Conversation</h4>
-                        <div className="space-y-2">
-                          {textBlocks.map((tb, i) => (
-                            <div key={i} className={`rounded-lg px-3 py-2 text-sm leading-relaxed ${tb.role === "user" ? "bg-accent/10 text-foreground/80" : "bg-card border border-border chat-markdown"}`}>
-                              <span className="text-[9px] font-semibold text-muted/50 uppercase block mb-0.5">{tb.role === "user" ? "Task" : "Agent"}</span>
-                              <ReactMarkdown>{tb.text}</ReactMarkdown>
+                    } catch { /* ignore */ }
+                  }
+                  // If no parsed messages yet, show summary/failure directly
+                  if (chatBubbles.length === 0 && (agentSessionData.summary || agentSessionData.failure_reason)) {
+                    chatBubbles.push({ role: "user", text: agentSessionData.todoText ?? "Task" });
+                    if (agentSessionData.summary) chatBubbles.push({ role: "agent", text: agentSessionData.summary });
+                    if (agentSessionData.failure_reason) chatBubbles.push({ role: "agent", text: agentSessionData.failure_reason });
+                  }
+                  const toolCalls = agentSessionData.tool_calls ? JSON.parse(agentSessionData.tool_calls) : [];
+                  return (
+                    <>
+                      {chatBubbles.map((bubble, i) => (
+                        <div key={i} className={`flex ${bubble.role === "user" ? "justify-end" : "justify-start"}`}>
+                          <div className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 ${
+                            bubble.role === "user"
+                              ? "bg-accent/15 text-foreground/90 rounded-br-md"
+                              : "bg-card border border-border rounded-bl-md"
+                          }`}>
+                            <div className="text-xs leading-relaxed chat-markdown">
+                              <ReactMarkdown>{bubble.text}</ReactMarkdown>
                             </div>
-                          ))}
+                            {bubble.toolCount && bubble.toolCount > 0 && (
+                              <span className="text-[9px] text-muted/40 mt-1 block">{bubble.toolCount} tool call{bubble.toolCount > 1 ? "s" : ""}</span>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    ) : null;
-                  } catch { return null; }
+                      ))}
+                      {agentSessionData.status === "running" && (
+                        <div className="flex justify-start">
+                          <div className="bg-card border border-border rounded-2xl rounded-bl-md px-3.5 py-2.5">
+                            <div className="flex items-center gap-1.5 text-xs text-muted">
+                              <Loader2 size={10} className="animate-spin text-purple-400" />
+                              <span>Working...</span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {/* Tool calls — collapsed at bottom */}
+                      {toolCalls.length > 0 && (
+                        <details className="mt-2">
+                          <summary className="text-[10px] text-muted/40 cursor-pointer hover:text-muted/70 transition-colors select-none">
+                            {toolCalls.length} tool call{toolCalls.length > 1 ? "s" : ""}
+                          </summary>
+                          <div className="space-y-1 mt-1.5 pl-2 border-l border-border/30">
+                            {toolCalls.map((tc: { tool: string; result: string; timestamp?: string }, i: number) => (
+                              <div key={i} className="text-[9px] text-muted/50">
+                                <span className="text-purple-400/60 font-medium">{tc.tool}</span>
+                                <span className="text-muted/30"> — {tc.result.slice(0, 120)}{tc.result.length > 120 ? "..." : ""}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+                    </>
+                  );
                 })()}
               </div>
               {/* Follow-up input */}
@@ -756,7 +867,7 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
             </div>
           ) : (
             /* Session list */
-            <div className="px-4 py-3 space-y-2">
+            <div className="px-4 py-3 space-y-1">
               {agentSessions.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center space-y-3">
                   <div className="w-12 h-12 rounded-2xl bg-purple-500/10 flex items-center justify-center">
@@ -774,17 +885,17 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                     <button
                       key={s.id}
                       onClick={() => loadAgentSession(s.id)}
-                      className="w-full text-left bg-card border border-border rounded-lg p-2.5 hover:bg-card-hover transition-colors"
+                      className="w-full text-left bg-card border border-border rounded-lg hover:bg-card-hover transition-colors"
                     >
-                      <div className="flex items-center gap-2 mb-0.5">
-                        {s.status === "running" && <Loader2 size={10} className="text-purple-400 animate-spin" />}
-                        {s.status === "completed" && <CheckCircle size={10} className="text-green-400" />}
-                        {s.status === "failed" && <XCircle size={10} className="text-red-400" />}
-                        <span className="text-xs font-medium truncate">{s.summary?.slice(0, 60) ?? "Processing..."}</span>
+                      <div className="flex items-center gap-2 px-3 py-2">
+                        {s.status === "running" && <Loader2 size={10} className="text-purple-400 animate-spin shrink-0" />}
+                        {s.status === "completed" && <CheckCircle size={10} className="text-green-400 shrink-0" />}
+                        {s.status === "failed" && <XCircle size={10} className="text-red-400 shrink-0" />}
+                        <span className="text-sm font-medium truncate flex-1">{s.summary?.slice(0, 60) ?? "Processing..."}</span>
+                        <span className="text-[9px] text-muted/40 shrink-0">
+                          {s.started_at ? new Date(s.started_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) : ""}
+                        </span>
                       </div>
-                      <span className="text-[9px] text-muted/40">
-                        {s.started_at ? new Date(s.started_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) : ""}
-                      </span>
                     </button>
                   ))}
                 </>
@@ -862,7 +973,7 @@ export default function Home() {
   }, [setChatCollapsed]);
 
   // Daily todos
-  const [dailyTodos, setDailyTodos] = useState<{ id: string; text: string; done: number; date: string; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number }[]>([]);
+  const [dailyTodos, setDailyTodos] = useState<{ id: string; text: string; done: number; date: string; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number; source?: string | null; source_id?: string | null }[]>([]);
   const [agentStatus, setAgentStatus] = useState<{ running: boolean; currentTodoId: string | null; currentTodoText: string | null; queueLength: number } | null>(null);
   const [agentSessions, setAgentSessions] = useState<Record<string, { id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string }>>({});
   const refreshTodos = useCallback(() => {
@@ -995,7 +1106,7 @@ export default function Home() {
         body: JSON.stringify({
           watchedChannels,
           githubMode,
-          ...(quick ? { slackLookbackMinutes: 5, activeDmChannelIds } : {}),
+          ...(quick ? { slackLookbackMinutes: 120, activeDmChannelIds } : {}),
         }),
       });
       const reader = res.body?.getReader();
@@ -1138,7 +1249,7 @@ export default function Home() {
   const calendarCount = items.filter((i) => i.source === "calendar").length;
 
   return (
-    <div className="h-screen bg-background flex flex-col overflow-hidden">
+    <div className="fixed inset-0 bg-background flex flex-col overflow-hidden">
       {/* ─── Top Bar ─── */}
       <header className="border-b border-border px-4 py-2.5 flex items-center gap-4 shrink-0">
         <div className="flex items-center gap-2">
@@ -1149,7 +1260,7 @@ export default function Home() {
           >
             {chatCollapsed ? <PanelLeft size={16} /> : <PanelLeftClose size={16} />}
           </button>
-          <h1 className="text-sm font-bold">Builder Agent</h1>
+          <h1 className="text-sm font-bold">Builder Command</h1>
         </div>
 
         {/* Socket status */}
@@ -1293,7 +1404,7 @@ export default function Home() {
 
         {/* Center: Dashboard */}
         <div className="flex-1 min-w-0 overflow-y-auto">
-          <div className="p-4">
+          <div className="px-4 pb-16">
             {items.length === 0 ? (
               <div className="text-center py-20 text-muted">
                 <p className="text-lg mb-2">No items yet</p>
@@ -1884,7 +1995,7 @@ function buildAutoTodos(items: TodoItem[]): AutoTodo[] {
 }
 
 function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTodo, agentSessions, onOpenAgentSession }: {
-  todos: { id: string; text: string; done: number; date: string | null; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number }[];
+  todos: { id: string; text: string; done: number; date: string | null; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number; source?: string | null; source_id?: string | null }[];
   onRefresh: () => void;
   inProgressTodoId?: string | null;
   onToggleInProgressTodo?: (id: string) => void;
@@ -1897,20 +2008,23 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
   const [editText, setEditText] = useState("");
   const [showDone, setShowDone] = useState(false);
   const [doneLimit, setDoneLimit] = useState(15);
-  const [pendingImage, setPendingImage] = useState<string | null>(null);
+  const [pendingImages, setPendingImages] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState(false);
+
+  const addPendingImage = (dataUrl: string) => {
+    setPendingImages(prev => [...prev, dataUrl]);
+    if (!newTodo.trim()) setNewTodo("Screenshot");
+  };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const file = e.dataTransfer.files[0];
-    if (file && file.type.startsWith("image/")) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        setPendingImage(reader.result as string);
-        if (!newTodo.trim()) setNewTodo("Screenshot");
-      };
-      reader.readAsDataURL(file);
+    for (const file of Array.from(e.dataTransfer.files)) {
+      if (file.type.startsWith("image/")) {
+        const reader = new FileReader();
+        reader.onload = () => addPendingImage(reader.result as string);
+        reader.readAsDataURL(file);
+      }
     }
   };
 
@@ -1922,10 +2036,7 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
         const file = item.getAsFile();
         if (file) {
           const reader = new FileReader();
-          reader.onload = () => {
-            setPendingImage(reader.result as string);
-            if (!newTodo.trim()) setNewTodo("Screenshot");
-          };
+          reader.onload = () => addPendingImage(reader.result as string);
           reader.readAsDataURL(file);
         }
         return;
@@ -1933,32 +2044,16 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
     }
   };
 
-  const setDeadline = async (id: string, deadline: string | null) => {
-    await fetch("/api/todos", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, deadline }),
-    });
-    onRefresh();
-  };
 
-  const formatDeadline = (dl: string) => {
-    const d = new Date(dl + "T00:00:00");
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
-    const diff = Math.ceil((d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-    if (diff < 0) return { text: `${Math.abs(diff)}d overdue`, color: "text-red-400" };
-    if (diff === 0) return { text: "today", color: "text-orange-400" };
-    if (diff === 1) return { text: "tomorrow", color: "text-yellow-400" };
-    return { text: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }), color: "text-muted/60" };
-  };
 
   const addTodo = async () => {
     const text = newTodo.trim();
-    if (!text && !pendingImage) return;
+    if (!text && pendingImages.length === 0) return;
     setNewTodo("");
-    const image = pendingImage;
-    setPendingImage(null);
+    const images = [...pendingImages];
+    setPendingImages([]);
+    // Store as JSON array if multiple, or single string for backward compat
+    const image = images.length > 1 ? JSON.stringify(images) : images[0] ?? null;
     await fetch("/api/todos", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1972,7 +2067,6 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
   const [noteText, setNoteText] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
-  const [expandedSession, setExpandedSession] = useState<string | null>(null);
 
   const toggleAgent = async (id: string, enabled: boolean) => {
     if (enabled) {
@@ -2075,7 +2169,7 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
   const doneTodos = todos.filter((t) => t.done).reverse();
 
   return (
-    <div className="space-y-1">
+    <div className="divide-y divide-border/20">
       {/* Undone todos */}
       {undoneTodos.map((todo) => (
         <div
@@ -2084,7 +2178,7 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
           onDragStart={() => handleDragStart(todo.id)}
           onDragOver={(e) => handleDragOver(e, todo.id)}
           onDragEnd={handleDragEnd}
-          className={`group/todo py-0.5 transition-all duration-400 ${completingIds.has(todo.id) ? "opacity-40 line-through scale-95 translate-x-2" : ""} ${dragId === todo.id ? "opacity-30" : ""} ${dragOverId === todo.id && dragId !== todo.id ? "border-t-2 border-accent" : ""} cursor-grab active:cursor-grabbing`}
+          className={`group/todo py-1.5 transition-all duration-400 ${completingIds.has(todo.id) ? "opacity-40 line-through scale-95 translate-x-2" : ""} ${dragId === todo.id ? "opacity-30" : ""} ${dragOverId === todo.id && dragId !== todo.id ? "border-t-2 border-accent" : ""} cursor-grab active:cursor-grabbing`}
         >
           <div className="flex items-center gap-2">
             <button
@@ -2094,17 +2188,19 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
               {completingIds.has(todo.id) ? <CheckSquare size={14} /> : <Square size={14} />}
             </button>
             {editingId === todo.id ? (
-              <input
+              <textarea
+                ref={(el) => { if (el) { el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; } }}
                 value={editText}
-                onChange={(e) => setEditText(e.target.value)}
+                onChange={(e) => { setEditText(e.target.value); const el = e.target; el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; }}
                 onBlur={() => saveEdit(todo.id)}
-                onKeyDown={(e) => { if (e.key === "Enter") saveEdit(todo.id); if (e.key === "Escape") setEditingId(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(todo.id); } if (e.key === "Escape") setEditingId(null); }}
                 autoFocus
-                className="flex-1 bg-transparent text-xs focus:outline-none border-b border-accent/50"
+                rows={1}
+                className="flex-1 bg-transparent text-xs focus:outline-none border-b border-accent/50 resize-none"
               />
             ) : (
               <span
-                className="flex-1 text-xs"
+                className="flex-1 text-xs whitespace-pre-wrap"
                 onDoubleClick={() => { setEditingId(todo.id); setEditText(todo.text); }}
               >
                 {todo.text}
@@ -2113,16 +2209,19 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
           {inProgressTodoId === todo.id && (
             <span className="text-[9px] text-sky-400 font-medium shrink-0 flex items-center gap-0.5"><Play size={8} fill="currentColor" /> In Progress</span>
           )}
-          {todo.deadline && (() => {
-            const dl = formatDeadline(todo.deadline);
-            return <span className={`text-[9px] shrink-0 ${dl.color}`}>{dl.text}</span>;
-          })()}
-          {todo.date === null && !todo.deadline && <span className="text-[9px] text-muted/30 shrink-0">persistent</span>}
+          {todo.source && (
+            <span className={`text-[9px] shrink-0 flex items-center gap-0.5 ${todo.source === "linear" ? "text-violet-400/60" : todo.source === "github" ? "text-orange-400/60" : "text-muted/40"}`}>
+              {todo.source === "linear" ? <CircleDot size={8} /> : todo.source === "github" ? <GitPullRequest size={8} /> : null}
+              {todo.source}
+            </span>
+          )}
+          {todo.date === null && <span className="text-[9px] text-muted/30 shrink-0">persistent</span>}
           {/* Agent session status badge */}
           {agentSessions?.[todo.id] && (() => {
             const session = agentSessions[todo.id];
             if (session.status === "running") return <span className="text-[9px] text-purple-400 font-medium shrink-0 flex items-center gap-0.5"><Loader2 size={8} className="animate-spin" /> Agent</span>;
             if (session.status === "completed") return <span className="text-[9px] text-green-400 font-medium shrink-0 flex items-center gap-0.5"><CheckCircle size={8} /> Done</span>;
+            if (session.status === "incomplete") return <span className="text-[9px] text-amber-400 font-medium shrink-0 flex items-center gap-0.5"><AlertCircle size={8} /> Incomplete</span>;
             if (session.status === "failed") return <span className="text-[9px] text-red-400 font-medium shrink-0 flex items-center gap-0.5"><XCircle size={8} /> Failed</span>;
             return null;
           })()}
@@ -2142,13 +2241,6 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
           >
             <Bot size={13} />
           </button>
-          <input
-            type="date"
-            value={todo.deadline ?? ""}
-            onChange={(e) => setDeadline(todo.id, e.target.value || null)}
-            className="opacity-0 group-hover/todo:opacity-100 w-5 h-5 text-[9px] bg-transparent cursor-pointer shrink-0 [&::-webkit-calendar-picker-indicator]:opacity-60 [&::-webkit-calendar-picker-indicator]:hover:opacity-100"
-            title="Set deadline"
-          />
           <button
             onClick={() => startNoting(todo.id)}
             className="opacity-0 group-hover/todo:opacity-100 text-muted/50 hover:text-green-400 transition-all p-1"
@@ -2178,55 +2270,20 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
             </div>
           )}
           {todo.image && (
-            <div className="ml-5 mt-0.5 mb-1">
-              <img src={todo.image} alt="" className="h-16 rounded border border-border/50 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => window.open(todo.image!, "_blank")} />
+            <div className="ml-5 mt-0.5 mb-1 flex gap-1 flex-wrap">
+              {(todo.image.startsWith("[") ? JSON.parse(todo.image) as string[] : [todo.image]).map((img, idx) => (
+                <img key={idx} src={img} alt="" className="h-16 rounded border border-border/50 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => window.open(img, "_blank")} />
+              ))}
             </div>
           )}
-          {/* Agent session details — prominent display */}
-          {agentSessions?.[todo.id] && (() => {
-            const session = agentSessions[todo.id];
-            const isCompleted = session.status === "completed";
-            const isFailed = session.status === "failed";
-            return (
-              <div className={`ml-5 mt-1 mb-1.5 rounded-lg p-2 ${isCompleted ? "bg-purple-500/5 border border-purple-500/15" : isFailed ? "bg-red-500/5 border border-red-500/15" : "bg-card border border-border"}`}>
-                {session.summary && (
-                  <p className="text-[11px] text-foreground/70 leading-relaxed whitespace-pre-wrap">{session.summary}</p>
-                )}
-                {session.failure_reason && (
-                  <p className="text-[11px] text-red-400/80 leading-relaxed">{session.failure_reason}</p>
-                )}
-                <div className="flex items-center gap-3 mt-1.5">
-                  {onOpenAgentSession && (
-                    <button
-                      onClick={() => onOpenAgentSession(session.id)}
-                      className="text-[10px] text-purple-400 hover:text-purple-300 transition-colors flex items-center gap-1 font-medium"
-                    >
-                      <MessageSquare size={9} /> Open in chat
-                    </button>
-                  )}
-                  {session.tool_calls && (
-                    <button
-                      onClick={() => setExpandedSession(expandedSession === todo.id ? null : todo.id)}
-                      className="text-[9px] text-muted/40 hover:text-muted/70 transition-colors flex items-center gap-0.5"
-                    >
-                      {expandedSession === todo.id ? <ChevronDown size={8} /> : <ChevronRight size={8} />}
-                      {JSON.parse(session.tool_calls).length} tool calls
-                    </button>
-                  )}
-                </div>
-                {expandedSession === todo.id && session.tool_calls && (
-                  <div className="mt-1 space-y-0.5 pl-2 border-l border-border/30">
-                    {JSON.parse(session.tool_calls).map((tc: { tool: string; result: string }, i: number) => (
-                      <div key={i} className="text-[9px] text-muted/50">
-                        <span className="text-purple-400/60">{tc.tool}</span>
-                        <span className="text-muted/30"> — {tc.result.slice(0, 100)}{tc.result.length > 100 ? "..." : ""}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
+          {/* Agent session — collapsible chat brief + follow-up */}
+          {agentSessions?.[todo.id] && (
+            <AgentSessionInline
+              session={agentSessions[todo.id]}
+              onOpenChat={onOpenAgentSession}
+              onRefresh={onRefresh}
+            />
+          )}
         </div>
       ))}
 
@@ -2237,22 +2294,28 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
         onDragLeave={() => setDragOver(false)}
         onDrop={handleDrop}
       >
-        {pendingImage && (
-          <div className="flex items-center gap-2 mb-1 ml-5">
-            <img src={pendingImage} alt="preview" className="h-12 rounded border border-border/50" />
-            <button onClick={() => setPendingImage(null)} className="text-muted/50 hover:text-red-400 text-[10px]"><X size={10} /></button>
+        {pendingImages.length > 0 && (
+          <div className="flex items-center gap-2 mb-1 ml-5 flex-wrap">
+            {pendingImages.map((img, idx) => (
+              <div key={idx} className="relative">
+                <img src={img} alt="preview" className="h-12 rounded border border-border/50" />
+                <button onClick={() => setPendingImages(prev => prev.filter((_, i) => i !== idx))} className="absolute -top-1 -right-1 bg-background rounded-full text-muted/50 hover:text-red-400 text-[10px]"><X size={10} /></button>
+              </div>
+            ))}
           </div>
         )}
-        <div className="flex items-center gap-2">
-          <Plus size={14} className="text-muted/30 shrink-0" />
-          <input
+        <div className="flex items-start gap-2">
+          <Plus size={14} className="text-muted/30 shrink-0 mt-0.5" />
+          <textarea
+            ref={(el) => { if (el) { el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; } }}
             value={newTodo}
-            onChange={(e) => setNewTodo(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") addTodo(); }}
+            onChange={(e) => { setNewTodo(e.target.value); const el = e.target; el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; }}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addTodo(); } }}
             onPaste={handlePaste}
             placeholder={dragOver ? "Drop image here..." : "Add a task..."}
             id="todo-input"
-            className="flex-1 bg-transparent text-xs placeholder:text-muted/30 focus:outline-none"
+            rows={1}
+            className="flex-1 bg-transparent text-xs placeholder:text-muted/30 focus:outline-none resize-none"
           />
           <button
             onClick={() => setNoDate(!noDate)}
@@ -2316,7 +2379,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   items: TodoItem[];
   setItems: React.Dispatch<React.SetStateAction<TodoItem[]>>;
   onDismiss: (item: TodoItem) => void;
-  dailyTodos: { id: string; text: string; done: number; date: string; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number }[];
+  dailyTodos: { id: string; text: string; done: number; date: string; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number; source?: string | null; source_id?: string | null }[];
   xpData: XpData | null;
   onRefreshTodos: () => void;
   onRefreshXp: () => void;
@@ -2345,6 +2408,14 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   const [pendingReviewCollapsed, setPendingReviewCollapsed] = useLocalStorage("ui:pendingReviewCollapsed", false);
   const [myTasksCollapsed, setMyTasksCollapsed] = useLocalStorage("ui:myTasksCollapsed", false);
   const [calendarCollapsed, setCalendarCollapsed] = useLocalStorage("ui:calendarCollapsed", false);
+  const calendarRef = useRef<HTMLDivElement>(null);
+  const [calendarHeight, setCalendarHeight] = useState(0);
+  useEffect(() => {
+    if (!calendarRef.current) return;
+    const ro = new ResizeObserver(() => setCalendarHeight(calendarRef.current?.offsetHeight ?? 0));
+    ro.observe(calendarRef.current);
+    return () => ro.disconnect();
+  }, []);
   const toggleCalendar = (calName: string) => {
     setHiddenCalendarsArr((prev) => {
       const s = new Set(prev);
@@ -2355,14 +2426,26 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   };
   const [linearStates, setLinearStates] = useState<{ id: string; name: string; type: string }[]>([]);
   const [linearMembers, setLinearMembers] = useState<{ id: string; name: string; email: string }[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
   // In-progress item (pinned to top of action queue)
   const [inProgressKey, setInProgressKey] = useLocalStorage<string | null>("ui:inProgressKey", null);
   const inProgressItem = inProgressKey ? items.find((i) => `${i.source}:${i.source_id}` === inProgressKey) : null;
   const inProgressTodoId = inProgressKey?.startsWith("todo:") ? inProgressKey.slice(5) : null;
+  const [fadingOutKey, setFadingOutKey] = useState<string | null>(null);
   const toggleInProgress = useCallback((item: TodoItem) => {
     const key = `${item.source}:${item.source_id}`;
-    setInProgressKey((prev) => prev === key ? null : key);
-  }, [setInProgressKey]);
+    if (inProgressKey === key) {
+      // Un-setting — no animation
+      setInProgressKey(null);
+    } else {
+      // Setting in progress — fade out first, then move
+      setFadingOutKey(key);
+      setTimeout(() => {
+        setInProgressKey(key);
+        setFadingOutKey(null);
+      }, 300);
+    }
+  }, [inProgressKey, setInProgressKey]);
   const toggleInProgressTodo = useCallback((todoId: string) => {
     const key = `todo:${todoId}`;
     setInProgressKey((prev) => prev === key ? null : key);
@@ -2382,6 +2465,21 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
       body: JSON.stringify({ prompt, source: item.source, source_id: item.source_id }),
     });
   }, [setInProgressKey]);
+
+  const [createTaskModal, setCreateTaskModal] = useState<{ source: string; sourceId: string; defaultText: string } | null>(null);
+  const createTaskFromItem = useCallback((source: string, sourceId: string, text: string) => {
+    setCreateTaskModal({ source, sourceId, defaultText: text.length > 120 ? text.slice(0, 120) + "..." : text });
+  }, []);
+  const submitCreateTask = useCallback(async (text: string) => {
+    if (!createTaskModal || !text.trim()) return;
+    await fetch("/api/todos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text.trim(), source: createTaskModal.source, source_id: createTaskModal.sourceId }),
+    });
+    setCreateTaskModal(null);
+    onRefreshTodos();
+  }, [createTaskModal, onRefreshTodos]);
 
   // Recently hidden
   const [showDismissed, setShowDismissed] = useState(false);
@@ -2477,7 +2575,26 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
       }
     }
     return true;
+  }).filter((i) => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    if (i.title.toLowerCase().includes(q)) return true;
+    const raw = i.raw_data ? JSON.parse(i.raw_data) : {};
+    if (raw.identifier?.toLowerCase().includes(q)) return true;
+    if (raw.description?.toLowerCase().includes(q)) return true;
+    if (raw.body?.toLowerCase().includes(q)) return true;
+    if (raw.repo?.toLowerCase().includes(q)) return true;
+    if (raw.project?.toLowerCase().includes(q)) return true;
+    if (raw.channelName?.toLowerCase().includes(q)) return true;
+    if (raw.senderName?.toLowerCase().includes(q)) return true;
+    if (raw.state?.toLowerCase().includes(q)) return true;
+    return false;
   });
+
+  // Filter todos by search
+  const searchedTodos = searchQuery.trim()
+    ? dailyTodos.filter(t => t.text.toLowerCase().includes(searchQuery.toLowerCase()))
+    : dailyTodos;
 
   // Update a Linear item's raw_data locally after a state/assignee change
   const onUpdateItem = useCallback((itemId: string, updates: Record<string, unknown>) => {
@@ -2493,9 +2610,14 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   const urgentSections = buildUrgentSections(filteredItems, slackUserId);
   const totalUrgent = urgentSections.reduce((sum, s) => sum + s.itemIds.size, 0);
 
+  // Helper: is this item currently in-progress? (exclude from sections, but allow fading items through)
+  const isItemInProgress = (i: TodoItem) => inProgressKey === `${i.source}:${i.source_id}` && fadingOutKey !== `${i.source}:${i.source_id}`;
+  const isItemFadingOut = (i: TodoItem) => fadingOutKey === `${i.source}:${i.source_id}`;
+
   // Filtered items for browse tabs
   const linearItems = items.filter((i) => {
     if (i.source !== "linear") return false;
+    if (isItemInProgress(i)) return false;
     const raw = i.raw_data ? JSON.parse(i.raw_data) : {};
     if (hiddenStates.has(raw.state)) return false;
     return true;
@@ -2503,6 +2625,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
 
   const githubItems = items.filter((i) => {
     if (i.source !== "github") return false;
+    if (isItemInProgress(i)) return false;
     const raw = i.raw_data ? JSON.parse(i.raw_data) : {};
     if (hideDrafts && raw.draft) return false;
     if (hiddenRepos.has(raw.repo)) return false;
@@ -2527,6 +2650,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
 
   const slackItems = items.filter((i) => {
     if (i.source !== "slack") return false;
+    if (isItemInProgress(i)) return false;
     if (hiddenSlackSenders.size === 0) return true;
     const raw = i.raw_data ? JSON.parse(i.raw_data) : {};
     const senderName = (raw.senderName ?? raw.sender ?? "").toLowerCase();
@@ -2544,13 +2668,21 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
     githubByRepo.get(repo)!.push(item);
   }
 
-  const [linearGroupBy, setLinearGroupBy] = useLocalStorage<"state" | "project" | "initiative">("filter:linearGroupBy", "state");
+  const [linearGroupBy, setLinearGroupBy] = useLocalStorage<"state" | "project" | "initiative" | "repo">("filter:linearGroupBy", "state");
 
   const linearGrouped = new Map<string, TodoItem[]>();
   for (const item of linearItems) {
     const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
     let key: string;
-    if (linearGroupBy === "project") {
+    if (linearGroupBy === "repo") {
+      const ghAttachment = (raw.attachments ?? []).find((a: { sourceType?: string; url?: string }) => a.sourceType === "github" && a.url);
+      if (ghAttachment) {
+        const match = ghAttachment.url.match(/github\.com\/([^/]+\/[^/]+)/);
+        key = match ? match[1] : "No Repo";
+      } else {
+        key = "No Repo";
+      }
+    } else if (linearGroupBy === "project") {
       key = raw.project ?? "No Project";
     } else if (linearGroupBy === "initiative") {
       key = raw.initiative ?? "No Initiative";
@@ -2573,10 +2705,11 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
     channelItems.sort((a, b) => {
       const aRaw = a.raw_data ? JSON.parse(a.raw_data) : {};
       const bRaw = b.raw_data ? JSON.parse(b.raw_data) : {};
-      return parseFloat(bRaw.timestamp ?? "0") - parseFloat(aRaw.timestamp ?? "0");
+      return parseFloat(aRaw.timestamp ?? "0") - parseFloat(bRaw.timestamp ?? "0");
     });
   }
   const sortedChannels = Array.from(slackByChannel.entries()).sort((a, b) => {
+    // Sort channels by most recent message (last item, since messages are chronological)
     const aLatest = a[1][a[1].length - 1];
     const bLatest = b[1][b[1].length - 1];
     const aTs = aLatest?.raw_data ? parseFloat(JSON.parse(aLatest.raw_data).timestamp ?? "0") : 0;
@@ -2588,69 +2721,37 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   const githubCount = items.filter((i) => i.source === "github").length;
   const slackCount = slackItems.length;
 
-  return (
-    <div className="space-y-3">
+  return (<>
+    <div>
       {/* Calendar Timeline — sticky + collapsible */}
-      <div className="sticky top-0 z-10 bg-background pb-1">
+      <div ref={calendarRef} className="sticky top-0 z-10 bg-background pb-3 pt-4">
         <div className="flex items-center gap-2 mb-1">
           <button onClick={() => setCalendarCollapsed(!calendarCollapsed)} className="text-xs text-muted hover:text-foreground transition-colors flex items-center gap-1">
             {calendarCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
             <span className="uppercase tracking-wide font-medium">Calendar</span>
           </button>
+          <div className="flex-1" />
+          <div className="relative">
+            <Search size={11} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted/40" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search..."
+              className="w-40 bg-card border border-border rounded pl-6 pr-6 py-1 text-[11px] focus:outline-none focus:border-accent/50 focus:w-64 transition-all"
+            />
+            {searchQuery && (
+              <button onClick={() => setSearchQuery("")} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted/40 hover:text-foreground">
+                <X size={10} />
+              </button>
+            )}
+          </div>
         </div>
         {!calendarCollapsed && <CalendarTimeline items={items} onDismiss={onDismiss} hiddenCalendars={hiddenCalendars} onToggleCalendar={toggleCalendar} />}
       </div>
 
-      {/* Recently Hidden toggle + panel */}
-      <div className="flex justify-end -mt-1 mb-1">
-        <button
-          onClick={() => { setShowDismissed(!showDismissed); if (!showDismissed) loadDismissed(); }}
-          className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${
-            showDismissed ? "bg-muted/20 text-foreground" : "text-muted/30 hover:text-muted/60"
-          }`}
-        >
-          Recently Hidden
-        </button>
-      </div>
-      {showDismissed && (
-        <div className="mb-3 bg-card border border-border rounded-lg overflow-hidden">
-          <div className="px-3 py-2 border-b border-border/50 flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-muted">Recently Hidden (last 24h)</span>
-            <button onClick={() => setShowDismissed(false)} className="text-muted hover:text-foreground"><X size={12} /></button>
-          </div>
-          {dismissedItems.length === 0 ? (
-            <div className="px-3 py-4 text-[11px] text-muted/50 text-center">No recently hidden items</div>
-          ) : (
-            <div className="divide-y divide-border/30 max-h-[300px] overflow-y-auto">
-              {dismissedItems.map((item) => (
-                <div key={item.id} className="px-3 py-1.5 flex items-center gap-2 hover:bg-card-hover transition-colors group/dismissed">
-                  <span className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded ${
-                    item.source === "slack" ? "bg-emerald-500/10 text-emerald-400" :
-                    item.source === "github" ? "bg-orange-500/10 text-orange-400" :
-                    item.source === "linear" ? "bg-violet-500/10 text-violet-400" :
-                    "bg-sky-500/10 text-sky-400"
-                  }`}>{item.source}</span>
-                  <span className="flex-1 text-[11px] text-muted truncate">{item.title}</span>
-                  <button
-                    onClick={() => handleUndismiss(item)}
-                    className="opacity-0 group-hover/dismissed:opacity-100 text-[10px] text-accent hover:underline transition-opacity shrink-0"
-                  >
-                    restore
-                  </button>
-                  {item.url && (
-                    <a href={item.url} target="_blank" rel="noopener noreferrer" className="opacity-0 group-hover/dismissed:opacity-100 text-muted hover:text-accent transition-opacity shrink-0">
-                      <ExternalLink size={10} />
-                    </a>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Tab content + Filters sidebar */}
-      <div className="flex gap-4">
+      <div className="flex gap-4" style={{ "--sticky-top": `${calendarHeight}px` } as React.CSSProperties}>
       <div className="flex-1 min-w-0">
       {activeTab === "dashboard" && (() => {
         const linearItems = filteredItems.filter((i) => i.source === "linear");
@@ -2763,9 +2864,9 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
               )}
             </div>
 
-            {/* Today's Work Summary — fills remaining height */}
+            {/* Today's Work Summary */}
             {xpData && xpData.todayActions.length > 0 && (
-              <div className="bg-card border border-border rounded-lg p-2 flex flex-col min-h-0 flex-1">
+              <div className="bg-card border border-border rounded-lg p-2 flex flex-col max-h-[50vh]">
                 <h3 className="text-[10px] font-semibold text-amber-400 mb-1 flex items-center gap-1 shrink-0">
                   <Zap size={10} /> Today — {xpData.today} XP
                 </h3>
@@ -2801,17 +2902,18 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
             const inProgressTodo = inProgressTodoId ? dailyTodos.find(t => t.id === inProgressTodoId) : null;
             return (
               <div className="space-y-1">
-                <button onClick={() => setInProgressCollapsed(!inProgressCollapsed)} className="text-xs uppercase tracking-wide text-muted flex items-center gap-2 hover:text-foreground transition-colors">
+                <button onClick={() => setInProgressCollapsed(!inProgressCollapsed)} className="w-full flex items-center gap-2 text-xs text-muted mb-1 px-1 hover:text-foreground transition-colors sticky bg-background z-[5] py-0.5" style={{ top: "var(--sticky-top)" }}>
                   {inProgressCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                  <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 flex items-center gap-1"><Play size={10} fill="currentColor" /> In Progress</span>
+                  <Play size={10} className="text-sky-400" />
+                  <span>In Progress</span>
                 </button>
                 {!inProgressCollapsed && <div className="bg-sky-500/5 border border-sky-500/30 rounded-lg relative">
                   <div className="absolute top-0 left-0 w-1 h-full bg-sky-400 rounded-l-lg" />
                   {inProgressItem?.source === "linear" && (
-                    <LinearCard item={inProgressItem} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} />
+                    <LinearCard item={inProgressItem} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} onCreateTask={createTaskFromItem} />
                   )}
                   {inProgressItem?.source === "github" && (
-                    <GithubCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} repoStatus={repoStatuses[(inProgressItem.raw_data ? JSON.parse(inProgressItem.raw_data) : {}).repo]} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} />
+                    <GithubCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} repoStatus={repoStatuses[(inProgressItem.raw_data ? JSON.parse(inProgressItem.raw_data) : {}).repo]} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} onCreateTask={createTaskFromItem} />
                   )}
                   {inProgressItem?.source === "calendar" && (
                     <CalendarCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} />
@@ -2834,21 +2936,23 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
 
           {/* Pending Review — tasks where agent finished but user hasn't checked off */}
           {(() => {
-            const pendingReview = dailyTodos.filter(t => !t.done && agentSessions[t.id] && (agentSessions[t.id].status === "completed" || agentSessions[t.id].status === "failed"));
+            const pendingReview = dailyTodos.filter(t => !t.done && agentSessions[t.id] && (agentSessions[t.id].status === "completed" || agentSessions[t.id].status === "failed" || agentSessions[t.id].status === "incomplete"));
             if (pendingReview.length === 0) return null;
             return (
               <div className="space-y-1">
-                <button onClick={() => setPendingReviewCollapsed(!pendingReviewCollapsed)} className="text-xs uppercase tracking-wide text-muted flex items-center gap-2 hover:text-foreground transition-colors">
+                <button onClick={() => setPendingReviewCollapsed(!pendingReviewCollapsed)} className="w-full flex items-center gap-2 text-xs text-muted mb-1 px-1 hover:text-foreground transition-colors sticky bg-background z-[5] py-0.5" style={{ top: "var(--sticky-top)" }}>
                   {pendingReviewCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                  <span className="px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 flex items-center gap-1"><Bot size={10} /> Pending Review</span>
-                  <span className="text-[10px] text-muted/50">{pendingReview.length}</span>
+                  <Bot size={10} className="text-purple-400" />
+                  <span>Pending Review</span>
+                  <span className="text-muted/50">{pendingReview.length}</span>
                 </button>
                 {!pendingReviewCollapsed && <div className="space-y-1.5">
                   {pendingReview.map(todo => {
                     const session = agentSessions[todo.id];
                     const isFailed = session.status === "failed";
+                    const isIncomplete = session.status === "incomplete";
                     return (
-                      <div key={todo.id} className={`border rounded-lg p-3 ${isFailed ? "bg-red-500/5 border-red-500/20" : "bg-purple-500/5 border-purple-500/20"}`}>
+                      <div key={todo.id} className={`border rounded-lg p-2.5 ${isFailed ? "bg-red-500/5 border-red-500/20" : isIncomplete ? "bg-amber-500/5 border-amber-500/20" : "bg-purple-500/5 border-purple-500/20"}`}>
                         <div className="flex items-center gap-2">
                           <button
                             onClick={async () => {
@@ -2863,29 +2967,17 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                           <span className="flex-1 text-xs font-medium">{todo.text}</span>
                           {isFailed ? (
                             <span className="text-[9px] text-red-400 flex items-center gap-0.5"><XCircle size={9} /> Failed</span>
+                          ) : isIncomplete ? (
+                            <span className="text-[9px] text-amber-400 flex items-center gap-0.5"><AlertCircle size={9} /> Incomplete</span>
                           ) : (
-                            <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={9} /> Agent done</span>
+                            <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={9} /> Done</span>
                           )}
                         </div>
-                        {session.summary && (
-                          <p className="mt-1.5 text-[11px] text-foreground/70 leading-relaxed ml-5">{session.summary}</p>
-                        )}
-                        {session.failure_reason && (
-                          <p className="mt-1.5 text-[11px] text-red-400/80 leading-relaxed ml-5">{session.failure_reason}</p>
-                        )}
-                        <div className="flex items-center gap-3 mt-1.5 ml-5">
-                          {onOpenAgentSession && (
-                          <button
-                            onClick={() => onOpenAgentSession(session.id)}
-                            className="text-[10px] text-purple-400 hover:text-purple-300 transition-colors flex items-center gap-1 font-medium"
-                          >
-                            <MessageSquare size={9} /> Open in chat
-                          </button>
-                          )}
-                          {session.tool_calls && (
-                            <span className="text-[9px] text-muted/40">{JSON.parse(session.tool_calls).length} tool calls</span>
-                          )}
-                        </div>
+                        <AgentSessionInline
+                          session={session}
+                          onOpenChat={onOpenAgentSession}
+                          onRefresh={onRefreshTodos}
+                        />
                       </div>
                     );
                   })}
@@ -2896,12 +2988,13 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
 
           {/* My Tasks section — always visible */}
           <div className="space-y-1">
-            <button onClick={() => setMyTasksCollapsed(!myTasksCollapsed)} className="text-xs uppercase tracking-wide text-muted flex items-center gap-2 hover:text-foreground transition-colors">
+            <button onClick={() => setMyTasksCollapsed(!myTasksCollapsed)} className="w-full flex items-center gap-2 text-xs text-muted mb-1 px-1 hover:text-foreground transition-colors sticky bg-background z-[5] py-0.5" style={{ top: "var(--sticky-top)" }}>
               {myTasksCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-              <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">My Tasks</span>
+              <CheckSquare size={10} className="text-yellow-400" />
+              <span>My Tasks</span>
             </button>
             {!myTasksCollapsed && <div className="bg-card border border-border rounded-lg px-3 py-2">
-              <TodoSection todos={dailyTodos} onRefresh={() => { onRefreshTodos(); onRefreshXp(); }} inProgressTodoId={inProgressTodoId} onToggleInProgressTodo={toggleInProgressTodo} agentSessions={agentSessions} onOpenAgentSession={(sessionId) => { setChatCollapsed(false); chatRef.current?.openAgentSession(sessionId); }} />
+              <TodoSection todos={searchedTodos} onRefresh={() => { onRefreshTodos(); onRefreshXp(); }} inProgressTodoId={inProgressTodoId} onToggleInProgressTodo={toggleInProgressTodo} agentSessions={agentSessions} onOpenAgentSession={onOpenAgentSession} />
             </div>}
           </div>
 
@@ -2916,7 +3009,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
               const label = isDm ? channel.replace(/^DM:\s*/, "") : channel;
               const dismissAll = () => channelItems.forEach((i) => onDismiss(i));
               return (
-                <CollapsibleGroup key={channel} label={label} icon={isDm ? <User size={10} /> : <Hash size={10} />} count={channelItems.length} defaultOpen onDismissAll={dismissAll}>
+                <CollapsibleGroup key={channel} label={label} icon={isDm ? <User size={10} /> : <Hash size={10} />} count={channelItems.length} defaultOpen onDismissAll={dismissAll} nested>
                   <div className="bg-card border border-border rounded-lg divide-y divide-border/50">
                     {(() => {
                       let lastOtherIdx = -1;
@@ -2950,17 +3043,15 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
             };
 
             return (
-              <CollapsibleGroup label="Slack" icon={<MessageSquare size={10} />} count={slackItems.length} defaultOpen>
+              <CollapsibleGroup label="Slack" icon={<MessageSquare size={10} className="text-emerald-400" />} count={slackItems.length} defaultOpen>
                 <div className="space-y-1 ml-3 border-l border-border/30 pl-2">
                   {regularChannels.map(renderSlackChannel)}
                   {dmChannels.length > 0 && (
-                    <div className="ml-3 border-l border-border/30 pl-2">
-                      <CollapsibleGroup label="Direct Messages" icon={<User size={10} />} count={totalDmMessages} defaultOpen>
-                        <div className="space-y-1">
-                          {dmChannels.map(renderSlackChannel)}
-                        </div>
-                      </CollapsibleGroup>
-                    </div>
+                    <CollapsibleGroup label="Direct Messages" icon={<User size={10} />} count={totalDmMessages} defaultOpen nested>
+                      <div className="space-y-1 ml-3 border-l border-border/30 pl-2">
+                        {dmChannels.map(renderSlackChannel)}
+                      </div>
+                    </CollapsibleGroup>
                   )}
                 </div>
               </CollapsibleGroup>
@@ -2969,12 +3060,14 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
 
           {/* GitHub section — grouped by repo */}
           {githubItems.length > 0 && (
-            <CollapsibleGroup label="GitHub" icon={<GitPullRequest size={10} />} count={githubItems.length} defaultOpen>
+            <CollapsibleGroup label="GitHub" icon={<GitPullRequest size={10} className="text-orange-400" />} count={githubItems.length} defaultOpen>
               <div className="space-y-1 ml-3 border-l border-border/30 pl-2">
                 {Array.from(githubByRepo.entries()).map(([repo, repoItems]) => (
-                  <CollapsibleGroup key={repo} label={repo} count={repoItems.length} mono defaultOpen>
+                  <CollapsibleGroup key={repo} label={repo} count={repoItems.length} mono defaultOpen nested>
                     {repoItems.map((item) => (
-                      <GithubCard key={item.id} item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} />
+                      <div key={item.id} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                        <GithubCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} onCreateTask={createTaskFromItem} />
+                      </div>
                     ))}
                   </CollapsibleGroup>
                 ))}
@@ -2984,11 +3077,11 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
 
           {/* Linear section — grouped by state/project/initiative */}
           {linearItems.length > 0 && (
-            <CollapsibleGroup label="Linear" icon={<CircleDot size={10} />} count={linearItems.length} defaultOpen>
+            <CollapsibleGroup label="Linear" icon={<CircleDot size={10} className="text-violet-400" />} count={linearItems.length} defaultOpen>
               <div className="space-y-1">
                 <div className="flex items-center gap-1.5 px-1 mb-1">
                   <span className="text-[10px] text-muted/60">Group by:</span>
-                  {(["state", "project", "initiative"] as const).map((mode) => (
+                  {(["state", "project", "initiative", "repo"] as const).map((mode) => (
                     <button key={mode} onClick={() => setLinearGroupBy(mode)}
                       className={`px-2 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
                         linearGroupBy === mode ? "bg-violet-500/20 text-violet-400 border border-violet-500/30" : "text-muted/50 hover:text-muted"
@@ -3000,9 +3093,11 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                 </div>
                 <div className="ml-3 border-l border-border/30 pl-2 space-y-1">
                   {Array.from(linearGrouped.entries()).map(([group, groupItems]) => (
-                    <CollapsibleGroup key={group} label={group} icon={<CircleDot size={10} />} count={groupItems.length} defaultOpen>
+                    <CollapsibleGroup key={group} label={group} icon={<CircleDot size={10} />} count={groupItems.length} defaultOpen nested>
                       {groupItems.map((item) => (
-                        <LinearCard key={item.id} item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} />
+                        <div key={item.id} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                          <LinearCard item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} onCreateTask={createTaskFromItem} />
+                        </div>
                       ))}
                     </CollapsibleGroup>
                   ))}
@@ -3010,6 +3105,50 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
               </div>
             </CollapsibleGroup>
           )}
+
+          {/* Recently Hidden */}
+          <div>
+            <div className="flex items-center gap-2 text-xs text-muted mb-1 px-1 group/header sticky bg-background z-[5] py-0.5" style={{ top: "var(--sticky-top)" }}>
+              <button onClick={() => { const next = !showDismissed; setShowDismissed(next); if (next) loadDismissed(); }} className="flex items-center gap-2 hover:text-foreground transition-colors">
+                {showDismissed ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                <EyeOff size={10} className="text-muted/50" />
+                <span>Recently Hidden</span>
+                <span className="text-muted/50">{dismissedItems.length}</span>
+              </button>
+            </div>
+            {showDismissed && (
+              <div className="space-y-1">
+                {dismissedItems.length === 0 ? (
+                  <div className="px-3 py-4 text-[11px] text-muted/50 text-center">No recently hidden items</div>
+                ) : (
+                  <div className="divide-y divide-border/20 ml-3 border-l border-border/30 pl-2">
+                    {dismissedItems.map((item) => (
+                      <div key={item.id} className="px-2 py-1.5 flex items-center gap-2 hover:bg-card-hover transition-colors group/dismissed rounded">
+                        <span className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded ${
+                          item.source === "slack" ? "bg-emerald-500/10 text-emerald-400" :
+                          item.source === "github" ? "bg-orange-500/10 text-orange-400" :
+                          item.source === "linear" ? "bg-violet-500/10 text-violet-400" :
+                          "bg-sky-500/10 text-sky-400"
+                        }`}>{item.source}</span>
+                        <span className="flex-1 text-[11px] text-muted truncate">{item.title}</span>
+                        <button
+                          onClick={() => handleUndismiss(item)}
+                          className="opacity-0 group-hover/dismissed:opacity-100 text-[10px] text-accent hover:underline transition-opacity shrink-0"
+                        >
+                          restore
+                        </button>
+                        {item.url && (
+                          <a href={item.url} target="_blank" rel="noopener noreferrer" className="opacity-0 group-hover/dismissed:opacity-100 text-muted hover:text-accent transition-opacity shrink-0">
+                            <ExternalLink size={10} />
+                          </a>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {linearItems.length === 0 && githubItems.length === 0 && slackItems.length === 0 && dailyTodos.filter(t => !t.done).length === 0 && !inProgressItem && (
             <div className="text-center py-8 text-muted">
@@ -3023,7 +3162,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
       </div>
 
       {/* Filters sidebar */}
-      <div className="w-48 shrink-0 space-y-3 sticky top-12 self-start max-h-[calc(100vh-5rem)] overflow-y-auto">
+      <div className="w-48 shrink-0 space-y-3 sticky self-start overflow-y-auto" style={{ top: "var(--sticky-top)", maxHeight: `calc(100vh - 5rem - ${calendarHeight}px)` }}>
         <h4 className="text-[10px] uppercase tracking-wider text-muted font-semibold">Filters</h4>
 
         {/* Linear state filters */}
@@ -3209,16 +3348,38 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
       </div>
       </div>
     </div>
-  );
+
+    {/* Create Task Modal */}
+    {createTaskModal && (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setCreateTaskModal(null)}>
+        <div className="bg-card border border-border rounded-lg p-4 w-[400px] max-w-[90vw]" onClick={(e) => e.stopPropagation()}>
+          <h3 className="text-sm font-semibold mb-3">Create Task</h3>
+          <form onSubmit={(e) => { e.preventDefault(); const input = e.currentTarget.elements.namedItem("taskText") as HTMLInputElement; submitCreateTask(input.value); }}>
+            <input
+              name="taskText"
+              autoFocus
+              defaultValue={createTaskModal.defaultText}
+              className="w-full bg-background border border-border rounded px-3 py-2 text-sm focus:outline-none focus:border-accent"
+              placeholder="Task description..."
+            />
+            <div className="flex justify-end gap-2 mt-3">
+              <button type="button" onClick={() => setCreateTaskModal(null)} className="px-3 py-1.5 text-xs text-muted hover:text-foreground transition-colors">Cancel</button>
+              <button type="submit" className="px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/80 transition-colors">Create</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    )}
+  </>);
 }
 
-function CollapsibleGroup({ label, icon, count, mono, defaultOpen = false, onDismissAll, children, storageKey }: {
-  label: string; icon?: React.ReactNode; count: number; mono?: boolean; defaultOpen?: boolean; onDismissAll?: () => void; children: React.ReactNode; storageKey?: string;
+function CollapsibleGroup({ label, icon, count, mono, defaultOpen = false, onDismissAll, children, storageKey, nested }: {
+  label: string; icon?: React.ReactNode; count: number; mono?: boolean; defaultOpen?: boolean; onDismissAll?: () => void; children: React.ReactNode; storageKey?: string; nested?: boolean;
 }) {
   const [open, setOpen] = useLocalStorage(storageKey ?? `__cg_${label}`, defaultOpen);
   return (
     <div>
-      <div className="flex items-center gap-2 text-xs text-muted mb-1 px-1 group/header">
+      <div className={`flex items-center gap-2 text-xs text-muted mb-1 px-1 group/header sticky bg-background py-0.5 ${nested ? "z-[4]" : "z-[5]"}`} style={{ top: nested ? "calc(var(--sticky-top, 0px) + 20px)" : "var(--sticky-top, 0px)" }}>
         <button onClick={() => setOpen(!open)} className="flex items-center gap-2 hover:text-foreground transition-colors">
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           {icon}
@@ -3236,14 +3397,14 @@ function CollapsibleGroup({ label, icon, count, mono, defaultOpen = false, onDis
   );
 }
 
-function ExpandableCard({ item, summary, children, onDismiss, onChatAbout, onAgentAction, isInProgress, onToggleInProgress }: {
-  item: TodoItem; summary?: React.ReactNode; children: React.ReactNode; onDismiss?: (item: TodoItem) => void; onChatAbout?: (prompt: string) => void; onAgentAction?: (prompt: string) => void; isInProgress?: boolean; onToggleInProgress?: () => void;
+function ExpandableCard({ item, summary, children, onDismiss, onChatAbout, onAgentAction, isInProgress, onToggleInProgress, onCreateTask }: {
+  item: TodoItem; summary?: React.ReactNode; children: React.ReactNode; onDismiss?: (item: TodoItem) => void; onChatAbout?: (prompt: string) => void; onAgentAction?: (prompt: string) => void; isInProgress?: boolean; onToggleInProgress?: () => void; onCreateTask?: (source: string, sourceId: string, text: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   return (
     <div className="bg-card border border-border rounded-lg hover:bg-card-hover transition-colors group">
-      <div className="flex items-center gap-3 px-4 py-3 cursor-pointer" onClick={() => setExpanded(!expanded)}>
+      <div className="flex items-center gap-2.5 px-3 py-2 cursor-pointer" onClick={() => setExpanded(!expanded)}>
         <button className="text-muted shrink-0">
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </button>
@@ -3251,37 +3412,31 @@ function ExpandableCard({ item, summary, children, onDismiss, onChatAbout, onAge
           <span className="text-sm font-medium truncate block">{item.title}</span>
           {summary && <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-0.5">{summary}</div>}
         </div>
-        {/* Custom Actions — prominent, always visible */}
-        {onChatAbout && (item.source === "github" || item.source === "linear") && (
-          <div onClick={(e) => e.stopPropagation()}>
-            <CustomActionsMenu source={item.source === "github" ? "github" : "linear"} context={{ identifier: raw.identifier ?? item.source_id, title: raw.title ?? item.title ?? "", description: raw.body ?? raw.description ?? "", url: item.url ?? "", state: raw.state ?? "", assignee: raw.assignee ?? "", labels: (raw.labels ?? []).join(", "), repo: raw.repo ?? "", author: raw.author ?? "", pr_number: String(raw.id ?? ""), reviewers: (raw.reviewers ?? []).join(", ") }} onAction={onChatAbout} onAgentAction={onAgentAction} size={16} />
-          </div>
-        )}
-        {item.url && (
-          <a href={item.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="text-accent/50 hover:text-accent transition-colors shrink-0">
-            <ExternalLink size={14} />
-          </a>
-        )}
         <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-          {onToggleInProgress && (
-            <button onClick={(e) => { e.stopPropagation(); onToggleInProgress(); }} className={`transition-colors p-1 ${isInProgress ? "text-sky-400 hover:text-muted" : "text-muted hover:text-sky-400"}`} title={isInProgress ? "Stop working" : "Set In Progress"}>
-              {isInProgress ? <Pause size={14} /> : <Play size={14} />}
+          {onCreateTask && (
+            <button onClick={(e) => { e.stopPropagation(); onCreateTask(item.source, item.source_id, item.title); }} className="text-muted hover:text-accent transition-colors p-1" title="Create task from this item">
+              <Plus size={12} />
             </button>
           )}
-          <SnoozeButton source={item.source} sourceId={item.source_id} onDone={() => onDismiss?.(item)} size={14} />
-          {onDismiss && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onDismiss(item); }}
-              className="text-muted hover:text-red-400 transition-colors p-1"
-              title="Dismiss"
-            >
-              <X size={14} />
+          {onToggleInProgress && (
+            <button onClick={(e) => { e.stopPropagation(); onToggleInProgress(); }} className={`transition-colors p-1 ${isInProgress ? "text-sky-400 hover:text-muted" : "text-muted hover:text-sky-400"}`} title={isInProgress ? "Stop working" : "Set In Progress"}>
+              {isInProgress ? <Pause size={12} /> : <Play size={12} />}
             </button>
+          )}
+          {item.url && (
+            <a href={item.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="text-accent/50 hover:text-accent transition-colors p-1">
+              <ExternalLink size={12} />
+            </a>
+          )}
+          {onChatAbout && (item.source === "github" || item.source === "linear") && (
+            <div onClick={(e) => e.stopPropagation()}>
+              <CustomActionsMenu source={item.source === "github" ? "github" : "linear"} context={{ identifier: raw.identifier ?? item.source_id, title: raw.title ?? item.title ?? "", description: raw.body ?? raw.description ?? "", url: item.url ?? "", state: raw.state ?? "", assignee: raw.assignee ?? "", labels: (raw.labels ?? []).join(", "), repo: raw.repo ?? "", author: raw.author ?? "", pr_number: String(raw.id ?? ""), reviewers: (raw.reviewers ?? []).join(", ") }} onAction={onChatAbout} onAgentAction={onAgentAction} />
+            </div>
           )}
         </div>
       </div>
       {expanded && (
-        <div className="px-4 pb-3 ml-[38px] border-t border-border/50 pt-3 text-xs space-y-2" onClick={(e) => e.stopPropagation()}>
+        <div className="px-3 pb-3 border-t border-border/50 pt-2.5 text-xs space-y-2" onClick={(e) => e.stopPropagation()}>
           {children}
         </div>
       )}
@@ -3308,7 +3463,7 @@ const STATE_ICONS: Record<string, string> = {
   "Waiting for Customer": "text-yellow-400",
 };
 
-function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentAction, onUpdateItem, hiddenStates, isInProgress, onToggleInProgress }: {
+function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentAction, onUpdateItem, hiddenStates, isInProgress, onToggleInProgress, onCreateTask }: {
   item: TodoItem;
   states: { id: string; name: string; type: string }[];
   members: { id: string; name: string; email: string }[];
@@ -3319,6 +3474,7 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentActi
   hiddenStates: Set<string>;
   isInProgress?: boolean;
   onToggleInProgress?: () => void;
+  onCreateTask?: (source: string, sourceId: string, text: string) => void;
 }) {
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   const [updating, setUpdating] = useState(false);
@@ -3397,6 +3553,11 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentActi
 
         {/* Actions on hover */}
         <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+          {onCreateTask && (
+            <button onClick={(e) => { e.stopPropagation(); onCreateTask(item.source, item.source_id, item.title); }} className="text-muted hover:text-accent transition-colors p-1" title="Create task from this ticket">
+              <Plus size={12} />
+            </button>
+          )}
           {onToggleInProgress && (
             <button onClick={(e) => { e.stopPropagation(); onToggleInProgress(); }} className={`transition-colors p-1 ${isInProgress ? "text-sky-400 hover:text-muted" : "text-muted hover:text-sky-400"}`} title={isInProgress ? "Stop working" : "Set In Progress"}>
               {isInProgress ? <Pause size={12} /> : <Play size={12} />}
@@ -3413,10 +3574,6 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentActi
             </a>
           )}
           <CustomActionsMenu source="linear" context={{ identifier: raw.identifier ?? "", title: raw.title ?? "", description: (raw.description ?? "").slice(0, 500), state: raw.state ?? "", assignee: raw.assignee ?? "", project: raw.project ?? "", url: item.url ?? "" }} onAction={(prompt) => onChatAbout(prompt)} onAgentAction={onAgentAction} />
-          <SnoozeButton source={item.source} sourceId={item.source_id} onDone={() => onDismiss(item)} />
-          <button onClick={(e) => { e.stopPropagation(); onDismiss(item); }} className="text-red-400/50 hover:text-red-400 transition-colors p-1" title="Dismiss">
-            <X size={12} />
-          </button>
         </div>
       </div>
 
@@ -3534,7 +3691,7 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentActi
   );
 }
 
-function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, repoStatus, isInProgress, onToggleInProgress }: { item: TodoItem; onDismiss: (item: TodoItem) => void; onChatAbout: (prompt: string, prInfo?: { repo: string; prNumber: number }) => void; onAgentAction?: (prompt: string) => void; repoStatus?: string; isInProgress?: boolean; onToggleInProgress?: () => void }) {
+function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, repoStatus, isInProgress, onToggleInProgress, onCreateTask }: { item: TodoItem; onDismiss: (item: TodoItem) => void; onChatAbout: (prompt: string, prInfo?: { repo: string; prNumber: number }) => void; onAgentAction?: (prompt: string) => void; repoStatus?: string; isInProgress?: boolean; onToggleInProgress?: () => void; onCreateTask?: (source: string, sourceId: string, text: string) => void }) {
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   const [merging, setMerging] = useState(false);
   const [mergeResult, setMergeResult] = useState<string | null>(null);
@@ -3569,6 +3726,17 @@ function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, repoStatus, i
   const failingChecks = checks.filter((c) => c.conclusion === "failure");
   const pendingChecks = checks.filter((c) => c.status !== "completed");
   const passingChecks = checks.filter((c) => c.conclusion === "success");
+
+  // Extract alpha environment URL from bot comments
+  const alphaUrl = (() => {
+    for (const c of comments) {
+      if (c.body?.includes("Alpha environment") || c.body?.includes("alpha.upsales.io")) {
+        const match = c.body.match(/https?:\/\/[^\s)]+\.alpha\.upsales\.io[^\s)"]*/);
+        if (match) return match[0];
+      }
+    }
+    return null;
+  })();
 
   const canMerge = raw.mergeable === true && failingChecks.length === 0;
   const hasConflicts = raw.mergeableState === "dirty" || raw.mergeable === false;
@@ -3628,7 +3796,7 @@ function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, repoStatus, i
   };
 
   return (
-    <ExpandableCard item={item} onDismiss={onDismiss} onChatAbout={onChatAbout} onAgentAction={onAgentAction} isInProgress={isInProgress} onToggleInProgress={onToggleInProgress} summary={
+    <ExpandableCard item={item} onDismiss={onDismiss} onChatAbout={onChatAbout} onAgentAction={onAgentAction} isInProgress={isInProgress} onToggleInProgress={onToggleInProgress} onCreateTask={onCreateTask} summary={
       <>
         {raw.author && <span className="text-[11px] text-muted flex items-center gap-1"><User size={10} /> {raw.author}</span>}
         {raw.reviewRequested && <span className="text-[11px] text-accent flex items-center gap-1"><GitPullRequest size={10} /> review requested</span>}
@@ -3639,6 +3807,7 @@ function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, repoStatus, i
         {checks.length > 0 && failingChecks.length === 0 && pendingChecks.length === 0 && (
           <span className="text-[11px] text-green-400 flex items-center gap-1"><CheckCircle size={10} /> checks pass</span>
         )}
+        {alphaUrl && <a href={alphaUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 bg-cyan-500/10 px-1.5 py-0.5 rounded"><ExternalLink size={9} /> Alpha</a>}
         {comments.length > 0 && <span className="text-[11px] text-muted flex items-center gap-1"><MessageSquare size={10} /> {comments.length}</span>}
         {(raw.updatedAt || raw.createdAt) && <span className="text-[11px] text-muted flex items-center gap-1"><Calendar size={10} /> {formatDate(raw.updatedAt ?? raw.createdAt)}</span>}
       </>
@@ -4158,6 +4327,316 @@ function AgentFollowUpInput({ sessionId, onSent }: { sessionId: string; onSent: 
   );
 }
 
+function AgentSessionInline({ session, onOpenChat, onRefresh }: {
+  session: { id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string };
+  onOpenChat?: (sessionId: string) => void;
+  onRefresh?: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [fullData, setFullData] = useState<{ messages?: string } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [followUp, setFollowUp] = useState("");
+  const [sending, setSending] = useState(false);
+  const [clankerModal, setClankerModal] = useState(false);
+  const isRunning = session.status === "running";
+
+  // Fetch full session data when expanded
+  useEffect(() => {
+    if (!expanded || fullData) return;
+    setLoading(true);
+    fetch(`/api/agent/sessions?session_id=${session.id}`)
+      .then(r => r.json())
+      .then(data => setFullData(data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [expanded, fullData, session.id]);
+
+  // Poll while running
+  useEffect(() => {
+    if (!expanded || !isRunning) return;
+    const interval = setInterval(() => {
+      fetch(`/api/agent/sessions?session_id=${session.id}`)
+        .then(r => r.json())
+        .then(data => setFullData(data))
+        .catch(() => {});
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [expanded, isRunning, session.id]);
+
+  // Parse messages into a clean Q&A view: user questions + agent final answers only
+  const chatMessages: { role: "user" | "agent"; text: string }[] = [];
+  const summaryText = (fullData as Record<string, unknown>)?.summary as string | undefined ?? session.summary;
+  const failureText = (fullData as Record<string, unknown>)?.failure_reason as string | undefined ?? session.failure_reason;
+  if (fullData?.messages) {
+    try {
+      const msgs = JSON.parse(fullData.messages);
+      // Group messages into rounds: each user message starts a new round
+      // For each round, keep the user message and only the LAST assistant text (the answer, not intermediate thinking)
+      let currentUserText: string | null = null;
+      let lastAgentText: string | null = null;
+
+      const flushRound = () => {
+        if (currentUserText) chatMessages.push({ role: "user", text: currentUserText });
+        if (lastAgentText) chatMessages.push({ role: "agent", text: lastAgentText });
+        currentUserText = null;
+        lastAgentText = null;
+      };
+
+      for (const msg of msgs) {
+        if (msg.role === "user") {
+          // Extract text from user messages, skip tool_result blocks
+          let text: string | null = null;
+          if (typeof msg.content === "string") {
+            text = msg.content;
+          } else if (Array.isArray(msg.content)) {
+            const hasToolResults = msg.content.some((b: { type: string }) => b.type === "tool_result");
+            if (!hasToolResults) {
+              const texts = msg.content.filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text);
+              if (texts.length > 0) text = texts.join("\n");
+            }
+          }
+          if (text) {
+            flushRound(); // flush previous round
+            currentUserText = text;
+          }
+        } else if (msg.role === "assistant") {
+          // Keep overwriting lastAgentText — we only want the final one per round
+          const texts: string[] = [];
+          if (Array.isArray(msg.content)) {
+            for (const block of msg.content) {
+              if (block.type === "text" && block.text?.trim()) texts.push(block.text);
+            }
+          } else if (typeof msg.content === "string" && msg.content.trim()) {
+            texts.push(msg.content);
+          }
+          if (texts.length > 0) lastAgentText = texts.join("\n\n");
+        }
+      }
+      flushRound(); // flush last round
+    } catch { /* ignore */ }
+  }
+  // Always ensure the summary/answer is shown
+  if (summaryText) {
+    const lastAgent = [...chatMessages].reverse().find(m => m.role === "agent");
+    if (!lastAgent || !lastAgent.text.includes(summaryText.slice(0, 80))) {
+      chatMessages.push({ role: "agent", text: summaryText });
+    }
+  }
+  if (failureText && !chatMessages.some(m => m.text.includes(failureText))) {
+    chatMessages.push({ role: "agent", text: `**Failed:** ${failureText}` });
+  }
+
+  const sendFollowUp = async () => {
+    if (!followUp.trim() || sending) return;
+    const text = followUp.trim();
+    setFollowUp("");
+    setSending(true);
+    // Optimistically add user message to chat
+    chatMessages.push({ role: "user", text });
+    // Fire and forget — don't block UI
+    fetch("/api/agent/trigger", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: session.id, follow_up: text }),
+    }).then(() => {
+      setFullData(null); // force re-fetch when done
+      onRefresh?.();
+    }).finally(() => setSending(false));
+  };
+
+  return (
+    <div className="mt-1.5 mb-1.5">
+      <div className="flex items-start gap-1.5 text-xs text-purple-400">
+        <button onClick={() => setExpanded(!expanded)} className="hover:text-purple-300 transition-colors shrink-0 mt-0.5 flex items-center gap-1">
+          {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          <Bot size={11} />
+        </button>
+        <span className="font-medium select-text cursor-text" onClick={(e) => { if (window.getSelection()?.toString()) { e.stopPropagation(); return; } setExpanded(!expanded); }}>
+          {isRunning ? "Working..." : session.summary ? (session.summary.split("\n")[0].replace(/^\*\*.*?\*\*\s*/, "").replace(/^#+\s*/, "").slice(0, 120) || session.summary.slice(0, 120)) : session.failure_reason ? "Failed" : "Agent result"}
+        </span>
+      </div>
+      {expanded && (
+        <div className="mt-2 ml-1 border-l-2 border-purple-500/20 pl-3 space-y-3">
+          {loading && (
+            <div className="flex items-center gap-1.5 text-xs text-muted">
+              <Loader2 size={12} className="animate-spin" /> Loading...
+            </div>
+          )}
+          {/* Q&A history */}
+          {chatMessages.map((msg, i) => (
+            <div key={i}>
+              {msg.role === "user" ? (
+                <div className="flex items-start gap-2">
+                  <User size={12} className="text-accent/60 shrink-0 mt-0.5" />
+                  <p className="text-xs text-accent/80 font-medium">{msg.text}</p>
+                </div>
+              ) : (
+                <div className="bg-card/50 rounded-lg px-3 py-2 border border-border/30">
+                  <div className="text-xs text-foreground/80 leading-relaxed chat-markdown">
+                    <ReactMarkdown>{msg.text}</ReactMarkdown>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+          {isRunning && (
+            <div className="flex items-center gap-1.5 text-xs text-muted">
+              <Loader2 size={12} className="animate-spin text-purple-400" /> Processing...
+            </div>
+          )}
+          {/* Follow-up input */}
+          {!isRunning && (
+            <div className="flex gap-2 items-center">
+              <input
+                type="text"
+                value={followUp}
+                onChange={(e) => setFollowUp(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendFollowUp(); } }}
+                placeholder="Follow up..."
+                className="flex-1 bg-background border border-border rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-purple-500/50"
+                disabled={sending}
+              />
+              <button
+                onClick={sendFollowUp}
+                disabled={sending || !followUp.trim()}
+                className="px-2.5 py-1.5 rounded bg-purple-600 text-white hover:bg-purple-700 text-xs transition-colors disabled:opacity-50 flex items-center gap-1"
+              >
+                {sending ? <Loader2 size={10} className="animate-spin" /> : <Send size={10} />}
+              </button>
+            </div>
+          )}
+          {/* Action links */}
+          <div className="flex items-center gap-3">
+            {onOpenChat && (
+              <button
+                onClick={() => onOpenChat(session.id)}
+                className="text-[10px] text-purple-400/40 hover:text-purple-300 transition-colors flex items-center gap-1"
+              >
+                <MessageSquare size={9} /> Full chat
+              </button>
+            )}
+            {!isRunning && session.summary && (
+              <button
+                onClick={() => setClankerModal(true)}
+                className="text-[10px] text-orange-400/40 hover:text-orange-300 transition-colors flex items-center gap-1"
+              >
+                <Zap size={9} /> Clanker session
+              </button>
+            )}
+          </div>
+          {clankerModal && (
+            <ClankerSessionModal
+              defaultPrompt={session.summary ?? ""}
+              onClose={() => setClankerModal(false)}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClankerSessionModal({ defaultPrompt, onClose }: { defaultPrompt: string; onClose: () => void }) {
+  const [prompt, setPrompt] = useState(defaultPrompt);
+  const [repos, setRepos] = useState<{ name: string }[]>([]);
+  const [repo, setRepo] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/clanker")
+      .then(r => r.json())
+      .then((data: { name: string }[]) => {
+        if (Array.isArray(data) && data.length > 0) {
+          setRepos(data);
+          setRepo(data[0].name);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const submit = async () => {
+    if (!prompt.trim() || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/clanker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: prompt.trim(),
+          repo: repo || undefined,
+          sessionType: "code",
+          createPrAutomatically: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || data.message || "Failed to create session");
+        return;
+      }
+      // Open the session in clanker
+      const clankerUrl = `https://clanker.upsales.com/session/${data.id}`;
+      window.open(clankerUrl, "_blank");
+      onClose();
+    } catch {
+      setError("Failed to connect to Clanker");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-card border border-border rounded-lg p-4 w-[500px] max-w-[90vw]" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold flex items-center gap-2"><Zap size={14} className="text-orange-400" /> New Clanker Session</h3>
+          <button onClick={onClose} className="text-muted hover:text-foreground"><X size={14} /></button>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="text-[10px] text-muted uppercase tracking-wider block mb-1">Task</label>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={4}
+              className="w-full bg-background border border-border rounded px-3 py-2 text-sm focus:outline-none focus:border-orange-500/50 resize-none"
+              placeholder="Describe the task..."
+              autoFocus
+            />
+          </div>
+          {repos.length > 0 && (
+            <div>
+              <label className="text-[10px] text-muted uppercase tracking-wider block mb-1">Repository</label>
+              <select
+                value={repo}
+                onChange={(e) => setRepo(e.target.value)}
+                className="w-full bg-background border border-border rounded px-3 py-2 text-sm focus:outline-none focus:border-orange-500/50"
+              >
+                {repos.map(r => (
+                  <option key={r.name} value={r.name}>{r.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          {error && <p className="text-xs text-red-400">{error}</p>}
+          <div className="flex justify-end gap-2">
+            <button onClick={onClose} className="px-3 py-1.5 text-xs text-muted hover:text-foreground">Cancel</button>
+            <button
+              onClick={submit}
+              disabled={!prompt.trim() || submitting}
+              className="px-3 py-1.5 rounded bg-orange-600 text-white hover:bg-orange-700 text-xs transition-colors disabled:opacity-50 flex items-center gap-1.5"
+            >
+              {submitting ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+              Create Session
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function formatTime(ts: string) {
   const d = new Date(parseFloat(ts) * 1000);
   const now = new Date();
@@ -4360,6 +4839,24 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
               }} className="cursor-pointer text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10 rounded px-1.5 py-0.5 transition-all flex items-center gap-1 text-[11px] font-medium" title="Reply">
                 <MessageSquare size={11} /> Reply
               </button>
+              <div className="w-px h-4 bg-border/30 mx-0.5" />
+              <button
+                disabled={sending}
+                onClick={async () => {
+                  // Reply "Kollar på det!" and create a todo task
+                  const taskText = `[Slack] ${raw.senderName ?? "Someone"} in #${raw.channelName ?? "channel"}: "${(raw.text ?? "").slice(0, 120)}"`;
+                  sendReplyMessage("Kollar på det!");
+                  await fetch("/api/todos", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ text: taskText }),
+                  });
+                }}
+                className="cursor-pointer text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 rounded px-1.5 py-0.5 transition-all flex items-center gap-1 text-[11px] font-medium disabled:opacity-50"
+                title="Reply 'Kollar på det!' and create a task"
+              >
+                <Zap size={11} /> Kollar på det!
+              </button>
             </div>
           </div>
           <p className="text-sm whitespace-pre-wrap leading-relaxed mt-0.5 text-foreground/80"><SlackText text={raw.text ?? ""} /></p>
@@ -4386,6 +4883,17 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
                   </a>
                 );
               })}
+            </div>
+          )}
+          {/* Reactions */}
+          {raw.reactions && raw.reactions.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1">
+              {raw.reactions.map((r: { name: string; count: number }, idx: number) => (
+                <span key={idx} className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-card-hover border border-border/50 text-xs">
+                  <span>{EMOJI_MAP[r.name] ?? `:${r.name}:`}</span>
+                  {r.count > 1 && <span className="text-[10px] text-muted/60">{r.count}</span>}
+                </span>
+              ))}
             </div>
           )}
         </div>
@@ -4598,7 +5106,7 @@ function ProfileSetup({ onDone }: { onDone: (p: Profile) => void }) {
   return (
     <div className="min-h-screen bg-background flex items-center justify-center">
       <div className="w-full max-w-sm bg-card border border-border rounded-xl p-6">
-        <h1 className="text-lg font-bold mb-1">Builder Agent</h1>
+        <h1 className="text-lg font-bold mb-1">Builder Command</h1>
         <p className="text-sm text-muted mb-6">Select yourself in each system.</p>
 
         <label className="block text-xs text-muted mb-1">GitHub</label>

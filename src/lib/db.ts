@@ -134,10 +134,24 @@ function migrate(db: Database.Database) {
     );
   `);
 
+  // Chat sessions (persist conversations for resumption)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+      id TEXT PRIMARY KEY,
+      title TEXT,
+      messages TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at);
+  `);
+
   // Add columns to existing tables
   try { db.exec("ALTER TABLE profile ADD COLUMN google_refresh_token TEXT"); } catch { /* already exists */ }
   try { db.exec("ALTER TABLE daily_todos ADD COLUMN deadline TEXT"); } catch { /* already exists */ }
   try { db.exec("ALTER TABLE daily_todos ADD COLUMN image TEXT"); } catch { /* already exists */ }
   try { db.exec("ALTER TABLE daily_todos ADD COLUMN note TEXT"); } catch { /* already exists */ }
   try { db.exec("ALTER TABLE daily_todos ADD COLUMN agent_enabled INTEGER DEFAULT 0"); } catch { /* already exists */ }
+  try { db.exec("ALTER TABLE daily_todos ADD COLUMN source TEXT"); } catch { /* already exists */ }
+  try { db.exec("ALTER TABLE daily_todos ADD COLUMN source_id TEXT"); } catch { /* already exists */ }
 }

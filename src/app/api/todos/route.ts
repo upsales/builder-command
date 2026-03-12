@@ -11,12 +11,13 @@ export async function GET(request: NextRequest) {
   const db = getDb();
 
   if (mode === "queue") {
-    // Fetch today's todos + all undated todos + incomplete past todos
+    // Fetch today's todos + all undated todos + incomplete past todos + done tasks from last 7 days
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const todos = db.prepare(
       `SELECT * FROM daily_todos
-       WHERE (date = ? OR date IS NULL OR (done = 0 AND date < ?))
+       WHERE (date = ? OR date IS NULL OR (done = 0 AND date < ?) OR (done = 1 AND date >= ? AND date < ?))
        ORDER BY done ASC, sort_order, created_at`
-    ).all(today(), today());
+    ).all(today(), today(), weekAgo, today());
     return NextResponse.json(todos);
   }
 
@@ -28,18 +29,18 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const { text, date, deadline, image } = await request.json();
+  const { text, date, deadline, image, source, source_id } = await request.json();
   const db = getDb();
   const id = randomUUID();
   // date can be: a date string, null (persistent), or undefined (defaults to today)
   const d = date === null ? null : (date ?? today());
   const maxOrder = db.prepare(
-    "SELECT COALESCE(MAX(sort_order), 0) as m FROM daily_todos WHERE date IS ?"
-  ).get(d) as { m: number };
+    "SELECT COALESCE(MAX(sort_order), 0) as m FROM daily_todos WHERE done = 0"
+  ).get() as { m: number };
   db.prepare(
-    "INSERT INTO daily_todos (id, date, text, sort_order, deadline, image) VALUES (?, ?, ?, ?, ?, ?)"
-  ).run(id, d, text, maxOrder.m + 1, deadline ?? null, image ?? null);
-  return NextResponse.json({ id, date: d, text, done: 0, sort_order: maxOrder.m + 1, deadline: deadline ?? null, image: image ?? null });
+    "INSERT INTO daily_todos (id, date, text, sort_order, deadline, image, source, source_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(id, d, text, maxOrder.m + 1, deadline ?? null, image ?? null, source ?? null, source_id ?? null);
+  return NextResponse.json({ id, date: d, text, done: 0, sort_order: maxOrder.m + 1, deadline: deadline ?? null, image: image ?? null, source: source ?? null, source_id: source_id ?? null });
 }
 
 export async function PATCH(request: NextRequest) {

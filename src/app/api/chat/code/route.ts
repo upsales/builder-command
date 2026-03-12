@@ -35,7 +35,7 @@ export async function POST(request: Request) {
     "--allowed-tools", "Glob",
     "--allowed-tools", "Bash(git:*)",
     "--permission-mode", "plan",
-    "--append-system-prompt", `You are a code expert embedded in Builder Agent. The user is asking about code in ${repo}. Use your tools to search and read actual code — don't guess. Be concise, use markdown, reference specific files and line numbers.`,
+    "--append-system-prompt", `You are a code expert embedded in Builder Command. The user is asking about code in ${repo}. Use your tools to search and read actual code — don't guess. Be concise, use markdown, reference specific files and line numbers.`,
     "--model", "sonnet",
     "--max-budget-usd", "0.50",
   ];

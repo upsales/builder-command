@@ -7,6 +7,12 @@ export interface SlackReply {
   timestamp: string;
 }
 
+export interface SlackReaction {
+  name: string;
+  count: number;
+  users: string[];
+}
+
 export interface SlackMessage {
   id: string;
   channel: string;
@@ -22,6 +28,7 @@ export interface SlackMessage {
   timestamp: string;
   isUnread: boolean;
   files?: { name: string; mimetype: string; url: string; thumb?: string }[];
+  reactions?: SlackReaction[];
   isThreadReply?: boolean;
 }
 
@@ -165,7 +172,7 @@ export async function fetchChannelMessages(
   activeDmChannelIds?: string[],
 ): Promise<SlackMessage[]> {
   const client = new WebClient(userToken);
-  const lookbackSec = (lookbackMinutes ?? 24 * 60) * 60;
+  const lookbackSec = (lookbackMinutes ?? 48 * 60) * 60;
   const oldest = String(Math.floor(Date.now() / 1000) - lookbackSec);
   const isQuickSync = lookbackMinutes != null && lookbackMinutes < 60;
 
@@ -389,6 +396,7 @@ export async function fetchChannelMessages(
     replyCount: number;
     replyUsers?: string[];
     files?: SlackFile[];
+    reactions?: { name: string; count: number; users: string[] }[];
   }
 
   const allMessages: SlackMessage[] = [];
@@ -429,6 +437,10 @@ export async function fetchChannelMessages(
                 }
               }
             }
+            // Extract reactions
+            const rawReactions = rawMsg.reactions as Array<{ name: string; count: number; users: string[] }> | undefined;
+            const reactions = rawReactions?.map(r => ({ name: r.name, count: r.count, users: r.users ?? [] }));
+
             msgs.push({
               channelId: ch.id,
               channelName: ch.name,
@@ -441,6 +453,7 @@ export async function fetchChannelMessages(
               replyCount: rawMsg.reply_count as number ?? 0,
               replyUsers: rawMsg.reply_users as string[] | undefined,
               files: files.length > 0 ? files : undefined,
+              reactions: reactions && reactions.length > 0 ? reactions : undefined,
             });
           }
           return msgs;
@@ -477,6 +490,7 @@ export async function fetchChannelMessages(
       isUnread: parseFloat(m.ts) > parseFloat(m.lastRead),
       timestamp: m.ts,
       files: m.files,
+      reactions: m.reactions,
     }));
 
     allMessages.push(...batchMessages);
@@ -503,32 +517,8 @@ export async function fetchChannelMessages(
     }
   } catch { /* non-fatal */ }
 
-  // Keep messages that are unread OR from watched channels OR from channels
-  // where the last message is from someone else (waiting on you)
-  const channelsToKeep = new Set<string>();
-  const watchedSet = new Set(watchedChannelIds ?? []);
-
-  // Group messages by channel to find the latest per channel
-  const msgsByChannel = new Map<string, SlackMessage[]>();
-  for (const m of allMessages) {
-    if (!msgsByChannel.has(m.channel)) msgsByChannel.set(m.channel, []);
-    msgsByChannel.get(m.channel)!.push(m);
-  }
-
-  for (const [channelId, msgs] of msgsByChannel) {
-    msgs.sort((a, b) => parseFloat(b.timestamp) - parseFloat(a.timestamp));
-    const latest = msgs[0];
-    // Keep if: has any unread from others, or last message is from someone else
-    const hasUnreadFromOthers = msgs.some(m => m.isUnread && m.sender !== userId);
-    if (hasUnreadFromOthers || (latest && latest.sender !== userId)) {
-      channelsToKeep.add(channelId);
-    }
-  }
-
-  const filteredMessages = allMessages.filter((m) => {
-    if (watchedSet.has(m.channel)) return true;
-    return channelsToKeep.has(m.channel);
-  });
+  // Keep all fetched messages — filtering is done in UI
+  const filteredMessages = allMessages;
 
   // Search for recent @mentions across ALL channels
   onProgress?.("searching for mentions");
@@ -538,13 +528,13 @@ export async function fetchChannelMessages(
       query: `<@${userId}>`,
       sort: "timestamp",
       sort_dir: "desc",
-      count: isQuickSync ? 20 : 30,
+      count: isQuickSync ? 30 : 50,
     });
     const rawMatches = ((mentionRes.messages as Record<string, unknown>)?.matches ?? []) as Array<Record<string, unknown>>;
 
     let toMeMatches: Array<Record<string, unknown>> = [];
     if (!isQuickSync) {
-      const toMeRes = await client.search.messages({ query: "to:me", sort: "timestamp", sort_dir: "desc", count: 30 });
+      const toMeRes = await client.search.messages({ query: "to:me", sort: "timestamp", sort_dir: "desc", count: 50 });
       toMeMatches = ((toMeRes.messages as Record<string, unknown>)?.matches ?? []) as Array<Record<string, unknown>>;
     }
     const seenTs = new Set<string>();
@@ -642,7 +632,7 @@ export async function fetchChannelMessages(
     console.log(`[slack] Mention search failed (may need search:read scope): ${e instanceof Error ? e.message : e}`);
   }
 
-  console.log(`[slack] ${allMessages.length} total messages, ${channelsToKeep.size} channels to keep, ${filteredMessages.length} after filter`);
+  console.log(`[slack] ${allMessages.length} total messages, ${filteredMessages.length} after filter`);
 
   filteredMessages.sort((a, b) => parseFloat(b.timestamp) - parseFloat(a.timestamp));
   return filteredMessages;
