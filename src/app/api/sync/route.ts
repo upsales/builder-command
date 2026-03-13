@@ -2,31 +2,25 @@ import { NextResponse } from "next/server";
 import { getProfile, upsertItem, removeStaleItems, getItems } from "@/lib/items";
 import { fetchAssignedIssues } from "@/lib/integrations/linear";
 import { fetchPRsNeedingReview, fetchMyPRs, fetchAssignedPRs } from "@/lib/integrations/github";
-import { fetchChannelMessages } from "@/lib/integrations/slack";
+import { fetchChannelMessages, type SyncPhase } from "@/lib/integrations/slack";
 import { fetchEvents } from "@/lib/integrations/google-calendar";
 import { notifyChange } from "@/lib/changeNotifier";
-import { startSlackSocket } from "@/lib/slackSocket";
-import { setSetting } from "@/lib/db";
-
 export async function POST(request: Request) {
-  // Auto-start Slack Socket Mode on first sync
-  startSlackSocket();
-
   const profile = getProfile();
   if (!profile) {
     return NextResponse.json({ error: "Profile not set up" }, { status: 400 });
   }
 
-  let watchedChannels: string[] | undefined;
   let slackLookbackMinutes: number | undefined;
   let activeDmChannelIds: string[] | undefined;
   let githubMode: "author" | "assignee" | undefined;
+  let slackPhases: SyncPhase[] | undefined;
   try {
     const body = await request.json();
-    watchedChannels = body.watchedChannels;
     slackLookbackMinutes = body.slackLookbackMinutes;
     activeDmChannelIds = body.activeDmChannelIds;
     githubMode = body.githubMode;
+    slackPhases = body.slackPhases;
   } catch { /* no body is fine */ }
 
   const encoder = new TextEncoder();
@@ -38,13 +32,8 @@ export async function POST(request: Request) {
 
       const sendItems = () => send("items", getItems());
 
-      // Persist watched channels to DB so server can use them on startup
-      if (watchedChannels && watchedChannels.length > 0) {
-        setSetting("slack:watchedChannels", JSON.stringify(watchedChannels));
-      }
-
-      // Run sources in parallel — on quick sync, only refresh Slack
-      const isQuickSync = slackLookbackMinutes != null && slackLookbackMinutes < 60;
+      // Quick sync = any subset of phases (skips Linear, GitHub, Calendar)
+      const isQuickSync = slackPhases && slackPhases.length < 5;
       const tasks: Promise<void>[] = [];
 
       // Linear (skip on quick sync)
@@ -128,7 +117,7 @@ export async function POST(request: Request) {
               profile.slack_token!,
               profile.slack_user_id!,
               (status) => send("status", { source: "slack", state: status }),
-              watchedChannels,
+              undefined,
               slackLookbackMinutes,
               (incrementalMessages) => {
                 for (const msg of incrementalMessages) {
@@ -146,6 +135,7 @@ export async function POST(request: Request) {
                 sendItems();
               },
               activeDmChannelIds,
+              slackPhases,
             );
             const finalSourceIds: string[] = [];
             for (const msg of messages) {
@@ -158,8 +148,8 @@ export async function POST(request: Request) {
                 raw_data: JSON.stringify(msg),
               });
             }
-            // Only prune stale items on full syncs (not quick 5-min polls)
-            if (!slackLookbackMinutes || slackLookbackMinutes >= 60) {
+            // Only prune stale items on full syncs
+            if (!isQuickSync) {
               removeStaleItems("slack", finalSourceIds);
             }
             sendItems();

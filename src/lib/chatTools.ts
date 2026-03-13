@@ -1,8 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { getItems, getProfile, dismissItem, snoozeItem } from "@/lib/items";
+import { getItems, getProfile, dismissItem, snoozeItem, upsertItem } from "@/lib/items";
 import { getDb } from "@/lib/db";
 import { mergePR, enableAutoMerge, addReviewer } from "@/lib/integrations/github";
-import { updateIssueState, updateIssueAssignee } from "@/lib/integrations/linear";
+import { updateIssueState, updateIssueAssignee, fetchSingleIssue } from "@/lib/integrations/linear";
+import { notifyChange } from "@/lib/changeNotifier";
 import { sendReply, addReaction } from "@/lib/integrations/slack";
 import { searchRepo, readRepoFile, listRepoFiles, ensureRepo } from "@/lib/repo-cache";
 import { browse, click, type as browserType, screenshot } from "@/lib/browser";
@@ -292,6 +293,12 @@ export async function executeTool(name: string, input: Record<string, unknown>):
         if (result.success) {
           const db = getDb();
           db.prepare("INSERT INTO xp_log (action, source, xp, label) VALUES (?, ?, ?, ?)").run("merge_pr", "github", 50, `Merged PR #${input.pr_number}`);
+          // Dismiss both possible source_id formats (review- and pr-) since the PR is now merged
+          const repo = input.repo as string;
+          const prNum = input.pr_number as number;
+          dismissItem("github", `pr-${repo}-${prNum}`);
+          dismissItem("github", `review-${repo}-${prNum}`);
+          notifyChange();
         }
         return result.success ? `PR #${input.pr_number} merged! +50 XP` : `Failed: ${result.message}`;
       }
@@ -305,10 +312,20 @@ export async function executeTool(name: string, input: Record<string, unknown>):
       }
       case "update_linear_status": {
         await updateIssueState(input.issue_id as string, input.state_id as string);
+        const updated = await fetchSingleIssue(input.issue_id as string);
+        if (updated) {
+          upsertItem({ source: "linear", source_id: updated.identifier, title: `[${updated.identifier}] ${updated.title}`, url: updated.url, raw_data: JSON.stringify(updated) });
+          notifyChange();
+        }
         return `Updated Linear issue status`;
       }
       case "assign_linear_issue": {
         await updateIssueAssignee(input.issue_id as string, (input.assignee_id as string) ?? null);
+        const updated = await fetchSingleIssue(input.issue_id as string);
+        if (updated) {
+          upsertItem({ source: "linear", source_id: updated.identifier, title: `[${updated.identifier}] ${updated.title}`, url: updated.url, raw_data: JSON.stringify(updated) });
+          notifyChange();
+        }
         return `Updated Linear issue assignment`;
       }
       case "reply_slack": {
@@ -334,7 +351,7 @@ export async function executeTool(name: string, input: Record<string, unknown>):
       }
       case "complete_todo": {
         const db = getDb();
-        db.prepare("UPDATE daily_todos SET done = 1 WHERE id = ?").run(input.todo_id);
+        db.prepare("UPDATE daily_todos SET done = 1, completed_at = ? WHERE id = ?").run(new Date().toISOString(), input.todo_id);
         db.prepare("INSERT INTO xp_log (action, source, xp, label) VALUES (?, ?, ?, ?)").run("complete_todo", "todo", 20, "Completed todo");
         return `Marked todo as done. +20 XP`;
       }

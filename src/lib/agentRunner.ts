@@ -45,7 +45,7 @@ export function getAgentStatus(): AgentStatus {
      WHERE dt.done = 0 AND dt.agent_enabled = 1
      AND NOT EXISTS (
        SELECT 1 FROM agent_sessions s
-       WHERE s.todo_id = dt.id AND s.status IN ('running', 'completed')
+       WHERE s.todo_id = dt.id
      )`
   ).get() as { count: number };
 
@@ -72,7 +72,30 @@ export function triggerAgent(todoId: string) {
     startAgentRunner();
   }
 
-  // If not currently processing, start immediately
+  // Check if there's an existing incomplete/failed session to resume
+  const existingSession = db.prepare(
+    `SELECT id, status FROM agent_sessions WHERE todo_id = ? ORDER BY created_at DESC LIMIT 1`
+  ).get(todoId) as { id: string; status: string } | undefined;
+
+  if (existingSession) {
+    if (existingSession.status === "running") {
+      // Already running, nothing to do
+      return;
+    }
+    if (existingSession.status === "completed") {
+      // Already done, nothing to do
+      return;
+    }
+    // Resume the existing incomplete/failed session
+    if (!processing) {
+      continueSession(existingSession.id, "Continue working on this task. Pick up where you left off.").catch(e => {
+        console.error("[AgentRunner] Failed to resume session:", e);
+      });
+    }
+    return;
+  }
+
+  // No existing session — start fresh
   if (!processing) {
     if (timer) {
       clearTimeout(timer);
@@ -102,21 +125,67 @@ async function tick() {
   scheduleNext();
 }
 
-function getNextEligibleTodo(): { id: string; text: string } | null {
+function getNextEligibleTodo(): { id: string; text: string; source?: string; source_id?: string } | null {
   const db = getDb();
+  // Exclude todos that already have ANY session (running, completed, failed, incomplete)
+  // Users must explicitly re-trigger or send a follow-up to retry
   return db.prepare(
-    `SELECT dt.id, dt.text FROM daily_todos dt
+    `SELECT dt.id, dt.text, dt.source, dt.source_id FROM daily_todos dt
      WHERE dt.done = 0 AND dt.agent_enabled = 1
      AND NOT EXISTS (
        SELECT 1 FROM agent_sessions s
-       WHERE s.todo_id = dt.id AND s.status IN ('running', 'completed')
+       WHERE s.todo_id = dt.id
      )
      ORDER BY dt.sort_order ASC
      LIMIT 1`
-  ).get() as { id: string; text: string } | null;
+  ).get() as { id: string; text: string; source?: string; source_id?: string } | null;
 }
 
-async function processTask(todo: { id: string; text: string }) {
+function getSourceContext(source?: string, sourceId?: string): string {
+  if (!source || !sourceId) return "";
+  const db = getDb();
+
+  if (source === "linear") {
+    const item = db.prepare("SELECT raw_data FROM items WHERE source = 'linear' AND source_id = ?").get(sourceId) as { raw_data?: string } | undefined;
+    if (item?.raw_data) {
+      try {
+        const raw = JSON.parse(item.raw_data);
+        const parts = [
+          `## Source: Linear Issue ${raw.identifier}`,
+          `**Title:** ${raw.title}`,
+          `**State:** ${raw.state}`,
+          `**Priority:** ${["None", "Urgent", "High", "Medium", "Low"][raw.priority ?? 0]}`,
+          raw.assignee ? `**Assignee:** ${raw.assignee}` : null,
+          raw.labels?.length ? `**Labels:** ${raw.labels.join(", ")}` : null,
+          raw.description ? `**Description:**\n${raw.description}` : null,
+          raw.url ? `**URL:** ${raw.url}` : null,
+        ].filter(Boolean);
+        return "\n\n" + parts.join("\n");
+      } catch { /* ignore */ }
+    }
+  }
+
+  if (source === "github") {
+    const item = db.prepare("SELECT raw_data FROM items WHERE source = 'github' AND source_id = ?").get(sourceId) as { raw_data?: string } | undefined;
+    if (item?.raw_data) {
+      try {
+        const raw = JSON.parse(item.raw_data);
+        const parts = [
+          `## Source: GitHub PR #${raw.id} (${raw.repo})`,
+          `**Title:** ${raw.title}`,
+          `**State:** ${raw.draft ? "Draft" : raw.mergeableState ?? "open"}`,
+          raw.body ? `**Description:**\n${raw.body.slice(0, 2000)}` : null,
+          raw.url ? `**URL:** ${raw.url}` : null,
+        ].filter(Boolean);
+        return "\n\n" + parts.join("\n");
+      } catch { /* ignore */ }
+    }
+  }
+
+  return "";
+}
+
+async function processTask(todo: { id: string; text: string; source?: string; source_id?: string }) {
   processing = true;
   currentTodoId = todo.id;
   const sessionId = randomUUID();
@@ -134,13 +203,16 @@ async function processTask(todo: { id: string; text: string }) {
   const toolCallsLog: { tool: string; input: unknown; result: string; timestamp: string }[] = [];
   const allMessages: Anthropic.MessageParam[] = [];
 
+  // Fetch source context (Linear issue details, GitHub PR details, etc.)
+  const sourceContext = getSourceContext(todo.source, todo.source_id);
+
   try {
     const basePrompt = buildSystemPrompt();
     const agentPrompt = `${basePrompt}
 
 ## AGENT MODE
 You are an autonomous AI agent. You've been assigned a specific task to complete.
-
+${sourceContext}
 RULES:
 1. Write a 1-sentence PLAN, then execute using tools
 2. Be CONCISE and DENSE — no filler, no fluff, no verbose explanations
@@ -427,16 +499,18 @@ function extractSummary(text: string): string {
 
 function recoverStaleSessions() {
   const db = getDb();
+  // Mark any 'running' sessions as incomplete — they were interrupted by server restart
+  // Use a short threshold (2 min) since in-memory state is gone on restart
   const stale = db.prepare(
     `UPDATE agent_sessions SET
-      status = 'failed',
-      failure_reason = 'Server restarted during processing.',
+      status = 'incomplete',
+      failure_reason = 'Server restarted during processing. Send a follow-up to continue.',
       completed_at = datetime('now')
     WHERE status = 'running'
-      AND started_at < datetime('now', '-10 minutes')`
+      AND started_at < datetime('now', '-2 minutes')`
   ).run();
 
   if (stale.changes > 0) {
-    console.log(`[AgentRunner] Recovered ${stale.changes} stale session(s)`);
+    console.log(`[AgentRunner] Recovered ${stale.changes} stale session(s) as incomplete`);
   }
 }

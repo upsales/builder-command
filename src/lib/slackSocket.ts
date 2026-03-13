@@ -1,8 +1,9 @@
 import { SocketModeClient } from "@slack/socket-mode";
 import { WebClient } from "@slack/web-api";
 import { getProfile, upsertItem } from "./items";
-import { getDb } from "./db";
+import { getDb, getSetting, setSetting } from "./db";
 import { notifyChange } from "./changeNotifier";
+import { updateLastReadCache } from "./integrations/slack";
 
 // Use globalThis to share state across Next.js dev mode module instances
 const g = globalThis as unknown as {
@@ -10,6 +11,7 @@ const g = globalThis as unknown as {
   __slackSocketStarted?: boolean;
   __slackSocketLog?: SlackSocketEvent[];
   __slackReadStateInterval?: ReturnType<typeof setInterval> | null;
+  __slackLastMessageTime?: number; // epoch ms of last received message
 };
 
 function getSocketClient() { return g.__slackSocketClient ?? null; }
@@ -62,16 +64,31 @@ async function resolveChannelName(webClient: WebClient, channelId: string, isDm:
   if (channelNameCache.has(channelId)) return channelNameCache.get(channelId)!;
   try {
     const res = await webClient.conversations.info({ channel: channelId });
+    const ch = res.channel as Record<string, unknown>;
     if (isDm) {
-      const userId = (res.channel as Record<string, unknown>)?.user as string;
+      // Single DM — resolve user name
+      const userId = ch?.user as string;
       if (userId) {
         const name = await resolveUserName(webClient, userId);
         const dmName = `DM: ${name}`;
         channelNameCache.set(channelId, dmName);
         return dmName;
       }
+      // MPIM (group DM) — use purpose or name_normalized
+      const purpose = (ch?.purpose as Record<string, unknown>)?.value as string;
+      if (purpose) {
+        const dmName = `DM: ${purpose.substring(0, 50)}`;
+        channelNameCache.set(channelId, dmName);
+        return dmName;
+      }
+      const nameNorm = ch?.name_normalized as string ?? ch?.name as string;
+      if (nameNorm) {
+        const dmName = `DM: ${nameNorm}`;
+        channelNameCache.set(channelId, dmName);
+        return dmName;
+      }
     }
-    const name = (res.channel as Record<string, string>)?.name;
+    const name = ch?.name as string;
     if (name) {
       channelNameCache.set(channelId, name);
       return name;
@@ -101,7 +118,7 @@ async function resolveUserMentions(webClient: WebClient, text: string): Promise<
   return result;
 }
 
-const READ_STATE_POLL_INTERVAL = 15_000; // 15 seconds
+const READ_STATE_POLL_INTERVAL = 60_000; // 60 seconds (avoid Slack rate limits)
 
 /**
  * Poll Slack for read-state changes on channels we have items for.
@@ -135,15 +152,16 @@ async function pollReadState(webClient: WebClient): Promise<void> {
   let changed = false;
   const channelIds = [...byChannel.keys()];
 
-  // Batch conversations.info calls (10 at a time for rate limits)
-  for (let i = 0; i < channelIds.length; i += 10) {
-    const batch = channelIds.slice(i, i + 10);
+  // Batch conversations.info calls (3 at a time to avoid rate limits)
+  for (let i = 0; i < channelIds.length; i += 3) {
+    const batch = channelIds.slice(i, i + 3);
     const results = await Promise.all(
       batch.map(async (chId) => {
         try {
           const info = await webClient.conversations.info({ channel: chId });
           const c = info.channel as Record<string, unknown>;
           const lastRead = c?.last_read as string;
+          if (lastRead) updateLastReadCache(chId, lastRead);
           return lastRead ? { chId, lastRead } : null;
         } catch {
           return null;
@@ -191,6 +209,163 @@ function stopReadStatePolling(): void {
   if (g.__slackReadStateInterval) {
     clearInterval(g.__slackReadStateInterval);
     g.__slackReadStateInterval = null;
+  }
+}
+
+/**
+ * Catch up on missed messages since the socket was last active.
+ * Fetches recent history from watched channels + DMs where we have items.
+ */
+/**
+ * Catch up on missed messages since the socket was last active.
+ * Uses the USER token (not bot token) so it can read DMs and private channels.
+ */
+async function catchUpMissedMessages(): Promise<void> {
+  const profile = getProfile();
+  if (!profile?.slack_user_id || !profile?.slack_token) {
+    logEvent("catchup", "No user token available, skipping catch-up");
+    return;
+  }
+
+  // Try in-memory first, then DB-persisted value, then default to 10 min ago
+  let lastTime = g.__slackLastMessageTime;
+  if (!lastTime) {
+    const persisted = getSetting("slack:lastMessageTime");
+    if (persisted) lastTime = parseInt(persisted, 10);
+  }
+  const oldest = lastTime
+    ? String(Math.floor(lastTime / 1000))
+    : String(Math.floor(Date.now() / 1000) - 10 * 60);
+
+  const gapSeconds = Math.floor((Date.now() - (lastTime ?? Date.now())) / 1000);
+  if (gapSeconds < 30) {
+    logEvent("catchup", `Gap only ${gapSeconds}s, skipping catch-up`);
+    return;
+  }
+
+  logEvent("catchup", `Catching up on messages since ${new Date(lastTime ?? Date.now() - 10 * 60_000).toLocaleTimeString()} (${gapSeconds}s gap)`);
+
+  // Use the user token for full access to DMs and private channels
+  const userClient = new WebClient(profile.slack_token);
+
+  // Get all channels with unread messages
+  const db = getDb();
+  const channelsToCheck: { id: string; isDm: boolean }[] = [];
+
+  try {
+    let cursor: string | undefined;
+    do {
+      const res = await userClient.conversations.list({
+        types: "public_channel,private_channel,mpim,im",
+        exclude_archived: true,
+        limit: 200,
+        cursor,
+      });
+      for (const ch of res.channels ?? []) {
+        if (!ch.id) continue;
+        const c = ch as Record<string, unknown>;
+        const unread = (c.unread_count as number) ?? 0;
+        if (unread > 0) {
+          channelsToCheck.push({ id: ch.id, isDm: ch.is_im === true || ch.is_mpim === true });
+        }
+      }
+      cursor = res.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+  } catch (e) {
+    logEvent("catchup_err", `Failed to list channels: ${e instanceof Error ? e.message : e}`);
+    // Fall back to channels from existing items
+    const existingChannels = db.prepare(
+      `SELECT DISTINCT json_extract(raw_data, '$.channel') as channel_id,
+              json_extract(raw_data, '$.channelName') as channel_name
+       FROM items WHERE source = 'slack' AND raw_data IS NOT NULL`
+    ).all() as { channel_id: string; channel_name: string }[];
+    for (const c of existingChannels) {
+      if (c.channel_id) channelsToCheck.push({ id: c.channel_id, isDm: c.channel_name?.startsWith("DM:") ?? false });
+    }
+  }
+
+  if (channelsToCheck.length === 0) {
+    logEvent("catchup", "No channels with unread messages");
+    return;
+  }
+
+  logEvent("catchup", `Checking ${channelsToCheck.length} channels with unread messages`);
+  let added = 0;
+
+  for (const channel of channelsToCheck.slice(0, 25)) {
+    try {
+      const result = await userClient.conversations.history({
+        channel: channel.id,
+        oldest,
+        limit: 20,
+      });
+
+      const messages = result.messages ?? [];
+      for (const msg of messages) {
+        if (!msg.ts || !msg.user) continue;
+        if (msg.user === profile.slack_user_id) continue;
+        if (msg.subtype && !["thread_broadcast", "file_share", "me_message"].includes(msg.subtype)) continue;
+
+        const sourceId = `${channel.id}-${msg.ts}`;
+        const existing = db.prepare("SELECT 1 FROM items WHERE source = 'slack' AND source_id = ?").get(sourceId);
+        if (existing) continue;
+
+        const dismissed = db.prepare("SELECT 1 FROM dismissed WHERE source = 'slack' AND source_id = ?").get(sourceId);
+        if (dismissed) continue;
+
+        const text = (msg.text ?? "").substring(0, 500);
+        const mentionsUser = text.includes(`<@${profile.slack_user_id}>`);
+
+        // For non-DM channels, only grab mentions (otherwise we'd pull every message from every channel)
+        if (!channel.isDm && !mentionsUser) continue;
+
+        const senderName = await resolveUserName(userClient, msg.user);
+        const channelName = await resolveChannelName(userClient, channel.id, channel.isDm);
+        const resolvedText = await resolveUserMentions(userClient, text);
+
+        let permalink = `https://slack.com/archives/${channel.id}/p${msg.ts.replace(".", "")}`;
+        try {
+          const pRes = await userClient.chat.getPermalink({ channel: channel.id, message_ts: msg.ts });
+          if (pRes.permalink) permalink = pRes.permalink;
+        } catch { /* use fallback */ }
+
+        upsertItem({
+          source: "slack",
+          source_id: sourceId,
+          title: `#${channelName} — ${senderName}: ${resolvedText.substring(0, 100)}`,
+          url: permalink,
+          raw_data: JSON.stringify({
+            channel: channel.id,
+            channelName,
+            text: resolvedText,
+            sender: msg.user,
+            senderName,
+            threadTs: msg.thread_ts ?? null,
+            timestamp: msg.ts,
+            isUnread: true,
+            replyCount: 0,
+            isThreadReply: false,
+          }),
+        });
+        added++;
+      }
+
+      // Small delay between channels to avoid rate limits
+      await new Promise(r => setTimeout(r, 300));
+    } catch (e) {
+      logEvent("catchup_err", `Failed to fetch ${channel.id}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  // Update the last message time to now so we don't re-catch-up
+  g.__slackLastMessageTime = Date.now();
+  setSetting("slack:lastMessageTime", String(g.__slackLastMessageTime));
+
+  if (added > 0) {
+    logEvent("catchup", `Added ${added} missed messages`);
+    notifyChange();
+  } else {
+    logEvent("catchup", "No missed messages found");
   }
 }
 
@@ -249,7 +424,7 @@ export function startSlackSocket(): void {
     const threadTs = event.thread_ts;
     const text = (event.text ?? "").substring(0, 500);
     const sender = event.user ?? "unknown";
-    const isDm = event.channel_type === "im";
+    const isDm = event.channel_type === "im" || event.channel_type === "mpim";
 
     const mentionsUser = text.includes(`<@${profile.slack_user_id}>`);
     logEvent("msg_parse", `isDm=${isDm} mentionsUser=${mentionsUser} isThread=${!!(threadTs && threadTs !== ts)} text="${text.substring(0, 60)}"`);
@@ -316,7 +491,7 @@ export function startSlackSocket(): void {
       }
     }
 
-    // New mention or DM — insert as new item
+    // Accept all DMs and all @mentions (no channel filter needed)
     if (mentionsUser || isDm) {
       logEvent("msg_add", `Adding ${isDm ? "DM" : "mention"} from ${senderName} in #${channelName}`);
 
@@ -359,9 +534,12 @@ export function startSlackSocket(): void {
         }),
       });
       logEvent("added", `${isDm ? "DM" : "Mention"} from ${senderName} in #${channelName}: "${resolvedText.substring(0, 60)}"`);
+      g.__slackLastMessageTime = Date.now();
+      setSetting("slack:lastMessageTime", String(g.__slackLastMessageTime));
       notifyChange();
     } else {
-      logEvent("msg_drop", `Not a mention or DM — from ${senderName} in #${channelName}: "${resolvedText.substring(0, 60)}"`);
+      logEvent("msg_drop", `Not a mention, DM, or watched — from ${senderName} in #${channelName}: "${resolvedText.substring(0, 60)}"`);
+      g.__slackLastMessageTime = Date.now();
     }
   });
 
@@ -385,7 +563,10 @@ export function startSlackSocket(): void {
   socketClient.on("connected" as string, () => {
     logEvent("connected", "Socket Mode connected to Slack");
     console.log("[slack-socket] Connected to Slack via Socket Mode");
-    startReadStatePolling(webClient);
+    // Catch up on any messages missed while disconnected
+    catchUpMissedMessages().catch(e => {
+      logEvent("catchup_err", `Catch-up failed: ${e instanceof Error ? e.message : e}`);
+    });
   });
   socketClient.on("authenticated" as string, (data: unknown) => {
     logEvent("auth", `Authenticated: ${JSON.stringify(data).slice(0, 200)}`);

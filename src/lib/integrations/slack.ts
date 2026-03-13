@@ -1,5 +1,10 @@
 import { WebClient } from "@slack/web-api";
 
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+// Mutex to prevent concurrent full syncs from competing for rate limits
+let fullSyncInProgress = false;
+
 export interface SlackReply {
   sender: string;
   senderName: string;
@@ -30,6 +35,9 @@ export interface SlackMessage {
   files?: { name: string; mimetype: string; url: string; thumb?: string }[];
   reactions?: SlackReaction[];
   isThreadReply?: boolean;
+  // Used by UI for grouping
+  newReplies?: SlackReply[];
+  hasNewReplies?: boolean;
 }
 
 export interface SlackChannel {
@@ -39,24 +47,22 @@ export interface SlackChannel {
   memberCount?: number;
 }
 
-// Persistent cache across syncs (same process)
+// ─── User resolution cache ───────────────────────────────────────────
 const userCache = new Map<string, string>();
 
 async function resolveUsers(client: WebClient, userIds: string[]): Promise<void> {
   const toResolve = userIds.filter((id) => !userCache.has(id));
-  for (let i = 0; i < toResolve.length; i += 10) {
-    const batch = toResolve.slice(i, i + 10);
-    await Promise.all(
-      batch.map(async (uid) => {
-        try {
-          const info = await client.users.info({ user: uid });
-          userCache.set(uid, info.user?.real_name ?? info.user?.name ?? uid);
-        } catch {
-          userCache.set(uid, uid);
-        }
-      })
-    );
-  }
+  // Resolve all in parallel — SDK handles rate limits
+  await Promise.all(
+    toResolve.map(async (uid) => {
+      try {
+        const info = await client.users.info({ user: uid });
+        userCache.set(uid, info.user?.real_name ?? info.user?.name ?? uid);
+      } catch {
+        userCache.set(uid, uid);
+      }
+    })
+  );
 }
 
 function getUserName(uid: string): string {
@@ -64,25 +70,30 @@ function getUserName(uid: string): string {
 }
 
 function cleanSlackTextSync(text: string): string {
-  // Resolve mentions and channels but keep URL markup for the frontend to render as clickable links
   let cleaned = text.replace(/<@([A-Z0-9]+)\|([^>]+)>/g, (_m, _uid, name) => `@${name}`);
   cleaned = cleaned.replace(/<@([A-Z0-9]+)>/g, (_m, uid) => `@${getUserName(uid)}`);
   cleaned = cleaned.replace(/<#[A-Z0-9]+\|([^>]+)>/g, "#$1");
-  // Keep <url|label> and <url> intact — the frontend SlackText component renders these as clickable links
   return cleaned;
 }
 
 const channelNameCache = new Map<string, string>();
+const lastReadCache = new Map<string, { ts: string; updatedAt: number }>();
 
-/**
- * List channels the user is a member of that have had activity in the last 7 days.
- */
+export function updateLastReadCache(channelId: string, lastRead: string): void {
+  lastReadCache.set(channelId, { ts: lastRead, updatedAt: Date.now() });
+}
+
+function makePermalink(channelId: string, ts: string): string {
+  return `https://app.slack.com/client/${channelId}/p${ts.replace(".", "")}`;
+}
+
+// ─── Channel listing ─────────────────────────────────────────────────
+
 export async function listUserChannels(userToken: string): Promise<SlackChannel[]> {
-  const client = new WebClient(userToken);
+  const client = new WebClient(userToken, { retryConfig: { retries: 0 }, rejectRateLimitedCalls: true });
   const channels: SlackChannel[] = [];
   const oneWeekAgo = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60;
 
-  // users.conversations only returns channels the user is in — much faster
   let cursor: string | undefined;
   do {
     const res = await client.users.conversations({
@@ -94,7 +105,6 @@ export async function listUserChannels(userToken: string): Promise<SlackChannel[
     for (const ch of res.channels ?? []) {
       if (!ch.id || !ch.name) continue;
       const raw = ch as Record<string, unknown>;
-      // Filter to recently active channels
       const updated = raw.updated as number | undefined;
       if (updated && updated < oneWeekAgo) continue;
       channels.push({
@@ -111,537 +121,638 @@ export async function listUserChannels(userToken: string): Promise<SlackChannel[
   return channels;
 }
 
-/**
- * Discover channels with unread messages using conversations.info for each channel.
- * Returns channel IDs that have unreads from other users.
- */
-async function discoverUnreadChannels(
-  client: WebClient,
-  userId: string,
-  channelIds: string[],
-  onProgress?: (status: string) => void,
-): Promise<{ id: string; name: string; lastRead: string }[]> {
-  const unreadChannels: { id: string; name: string; lastRead: string }[] = [];
+// ─── Core: fetch unread channels matching Slack's read state ─────────
 
-  // Batch conversations.info calls (10 at a time to respect rate limits)
-  for (let i = 0; i < channelIds.length; i += 10) {
-    const batch = channelIds.slice(i, i + 10);
-    if (i > 0 && i % 50 === 0) {
-      onProgress?.(`checking unreads ${i}/${channelIds.length}`);
-    }
-    const results = await Promise.all(
+interface ChannelWithUnreads {
+  id: string;
+  name: string;
+  isDm: boolean;
+  lastRead: string;
+  unreadCount: number;
+}
+
+/**
+ * Search Slack and extract channel info from results.
+ * Returns a map of channel ID → channel metadata.
+ */
+async function searchChannels(
+  client: WebClient,
+  query: string,
+  count: number = 50,
+): Promise<Map<string, { name: string; isDm: boolean; userId?: string }>> {
+  const channelMap = new Map<string, { name: string; isDm: boolean; userId?: string }>();
+  const res = await client.search.messages({ query, sort: "timestamp", sort_dir: "desc", count }).catch(() => null);
+  if (!res) return channelMap;
+  const matches = ((res.messages as Record<string, unknown>)?.matches ?? []) as Array<Record<string, unknown>>;
+  for (const match of matches) {
+    const ch = match.channel as Record<string, unknown> | undefined;
+    const chId = ch?.id as string;
+    if (!chId || channelMap.has(chId)) continue;
+    const isDm = chId.startsWith("D");
+    const isMpim = chId.startsWith("G");
+    const name = (ch?.name as string) ?? chId;
+    channelMap.set(chId, { name, isDm: isDm || isMpim, userId: isDm ? name : undefined });
+  }
+  return channelMap;
+}
+
+/**
+ * Given a set of channel IDs, get last_read and filter to those with actual unreads.
+ * Batches conversations.info calls to avoid rate limits (Tier 3 = ~50/min).
+ */
+async function filterToUnread(
+  client: WebClient,
+  channelMap: Map<string, { name: string; isDm: boolean; userId?: string }>,
+): Promise<ChannelWithUnreads[]> {
+  const channelIds = [...channelMap.keys()];
+  const infoResults: ({ chId: string; lastRead: string; latestTs: string | undefined } | null)[] = [];
+
+  // Batch in groups of 3 with 2s delays to stay within Tier 3 rate limits (~50/min)
+  const batchSize = 3;
+  for (let i = 0; i < channelIds.length; i += batchSize) {
+    if (i > 0) await sleep(2000);
+    const batch = channelIds.slice(i, i + batchSize);
+    const batchResults = await Promise.all(
       batch.map(async (chId) => {
         try {
           const info = await client.conversations.info({ channel: chId });
           const c = info.channel as Record<string, unknown>;
-          const unreadCount = (c?.unread_count_display as number) ?? (c?.unread_count as number) ?? 0;
-          if (unreadCount > 0) {
-            const name = (c?.name as string) ?? chId;
-            const lastRead = (c?.last_read as string) ?? "0";
-            channelNameCache.set(chId, name);
-            return { id: chId, name, lastRead };
-          }
+          const lr = (c.last_read as string) ?? "0";
+          const latest = c.latest as Record<string, unknown> | undefined;
+          const latestTs = latest?.ts as string | undefined;
+          updateLastReadCache(chId, lr);
+          return { chId, lastRead: lr, latestTs };
         } catch {
-          // skip channels we can't access
+          return null;
         }
-        return null;
       })
     );
-    for (const r of results) {
-      if (r) unreadChannels.push(r);
+    infoResults.push(...batchResults);
+  }
+
+  const userIdsToResolve = new Set<string>();
+  const unreadChannels: ChannelWithUnreads[] = [];
+
+  for (const result of infoResults) {
+    if (!result) continue;
+    const { chId, lastRead, latestTs } = result;
+    if (lastRead !== "0" && lastRead !== "0000000000.000000" && latestTs) {
+      if (parseFloat(latestTs) <= parseFloat(lastRead)) continue;
     }
+    const chInfo = channelMap.get(chId)!;
+    if (chInfo.isDm && chInfo.userId && /^[A-Z][A-Z0-9]{8,}$/.test(chInfo.userId)) {
+      userIdsToResolve.add(chInfo.userId);
+    }
+    if (/^[A-Z][A-Z0-9]{8,}$/.test(chInfo.name)) userIdsToResolve.add(chInfo.name);
+    unreadChannels.push({
+      id: chId, name: chInfo.name, isDm: chInfo.isDm,
+      lastRead: (lastRead === "0000000000.000000" ? "0" : lastRead), unreadCount: 1,
+    });
+  }
+
+  if (userIdsToResolve.size > 0) await resolveUsers(client, [...userIdsToResolve]);
+
+  for (const ch of unreadChannels) {
+    if (/^[A-Z][A-Z0-9]{8,}$/.test(ch.name)) {
+      const resolved = getUserName(ch.name);
+      if (resolved !== ch.name) ch.name = `DM: ${resolved}`;
+    }
+    if (ch.isDm && !ch.name.startsWith("DM:")) ch.name = `DM: ${ch.name}`;
+    channelNameCache.set(ch.id, ch.name);
   }
 
   return unreadChannels;
 }
 
+interface SlackFile {
+  name: string;
+  mimetype: string;
+  url: string;
+  thumb?: string;
+}
+
+const ALLOWED_SUBTYPES = new Set(["thread_broadcast", "file_share", "me_message", "bot_message"]);
+
 /**
- * Fetch messages from specific watched channels + all DMs for the last 24h.
- * Includes the user's own messages so DM conversations show both sides.
+ * For a single channel, fetch messages in a SINGLE API call.
+ * Uses cached last_read when available, falls back to conversations.info only when needed.
+ * Returns raw messages with isUnread flag, plus collected user IDs.
  */
-// Cache DM channels across quick syncs
-let cachedDmChannels: { id: string; userId: string }[] | null = null;
+async function fetchChannelRaw(
+  client: WebClient,
+  channel: ChannelWithUnreads,
+  contextCount: number = 3,
+): Promise<{ messages: SlackMessage[]; userIds: Set<string> }> {
+  const userIds = new Set<string>();
+
+  // Use last_read from channel (already populated by filterToUnread via bulk fetch)
+  let lastRead = channel.lastRead;
+  if (lastRead === "0") {
+    const cached = lastReadCache.get(channel.id);
+    lastRead = cached?.ts ?? "0";
+  }
+
+  // If still no last_read, use 4h lookback as fallback
+  if (lastRead === "0") {
+    lastRead = String(Math.floor(Date.now() / 1000) - 4 * 60 * 60);
+  }
+
+  // Single API call: fetch last ~20 messages (enough for context + unread)
+  let res;
+  try {
+    // Fetch a window around last_read: go back a bit for context
+    res = await client.conversations.history({
+      channel: channel.id,
+      limit: 20 + contextCount,
+    });
+  } catch {
+    return { messages: [], userIds };
+  }
+
+  const allMsgs = ((res.messages ?? []) as Array<Record<string, unknown>>).reverse(); // oldest first
+  if (allMsgs.length === 0) return { messages: [], userIds };
+
+  // Split into context (before last_read) and unread (after last_read)
+  const lastReadF = parseFloat(lastRead);
+  const unreadMsgs = allMsgs.filter(m => parseFloat((m.ts as string) ?? "0") > lastReadF);
+  if (unreadMsgs.length === 0) return { messages: [], userIds };
+
+  // Get context: messages just before the unread boundary
+  const contextMsgs = allMsgs
+    .filter(m => parseFloat((m.ts as string) ?? "0") <= lastReadF)
+    .slice(-contextCount);
+
+  // Collect user IDs
+  for (const msg of [...contextMsgs, ...unreadMsgs]) {
+    if (msg.user) userIds.add(msg.user as string);
+    const text = (msg.text as string) ?? "";
+    for (const match of text.matchAll(/<@([A-Z0-9]+)/g)) userIds.add(match[1]);
+    const replyUsers = msg.reply_users as string[] | undefined;
+    if (replyUsers) for (const u of replyUsers) userIds.add(u);
+  }
+
+  const parseMsg = (raw: Record<string, unknown>, isUnread: boolean): SlackMessage | null => {
+    const subtype = raw.subtype as string | undefined;
+    if (subtype && !ALLOWED_SUBTYPES.has(subtype)) return null;
+    const ts = (raw.ts as string) ?? "";
+    const user = (raw.user as string) || (raw.bot_id as string) || "";
+
+    const rawFiles = raw.files as Array<Record<string, unknown>> | undefined;
+    const files: SlackFile[] = [];
+    if (rawFiles) {
+      for (const f of rawFiles) {
+        const url = (f.url_private as string) ?? (f.permalink as string) ?? "";
+        if (url) files.push({
+          name: (f.name as string) ?? "file",
+          mimetype: (f.mimetype as string) ?? "",
+          url,
+          thumb: (f.thumb_360 as string) ?? (f.thumb_480 as string) ?? undefined,
+        });
+      }
+    }
+
+    const rawReactions = raw.reactions as Array<{ name: string; count: number; users: string[] }> | undefined;
+    const reactions = rawReactions?.map(r => ({ name: r.name, count: r.count, users: r.users ?? [] }));
+    const threadTs = raw.thread_ts as string | undefined;
+    const replyUsers = raw.reply_users as string[] | undefined;
+
+    // Include attachment text (bot messages often put content in attachments)
+    let text = (raw.text as string) ?? "";
+    const rawAttachments = raw.attachments as Array<Record<string, unknown>> | undefined;
+    if (rawAttachments) {
+      for (const att of rawAttachments) {
+        let attText = (att.text as string) || (att.fallback as string) || "";
+        attText = attText.replace(/```/g, "").trim();
+        if (attText && !text.includes(attText.substring(0, 50))) {
+          text += (text ? "\n" : "") + attText;
+        }
+      }
+    }
+
+    return {
+      id: `${channel.id}-${ts}`,
+      channel: channel.id,
+      channelName: channel.name,
+      text,
+      sender: user,
+      senderName: (raw.username as string) || user,
+      threadTs: threadTs ?? null,
+      replyCount: (raw.reply_count as number) ?? 0,
+      replyUserNames: replyUsers ? [...replyUsers] : undefined,
+      replies: [],
+      permalink: makePermalink(channel.id, ts),
+      isUnread,
+      timestamp: ts,
+      files: files.length > 0 ? files : undefined,
+      reactions: reactions && reactions.length > 0 ? reactions : undefined,
+      isThreadReply: !!(threadTs && threadTs !== ts),
+    };
+  };
+
+  const contextParsed = contextMsgs.map(m => parseMsg(m, false)).filter((m): m is SlackMessage => m !== null);
+  const newParsed = unreadMsgs.map(m => parseMsg(m, true)).filter((m): m is SlackMessage => m !== null);
+
+  // Update cache with the latest message's ts
+  const latestTs = allMsgs[allMsgs.length - 1]?.ts as string;
+  if (latestTs) updateLastReadCache(channel.id, lastRead); // keep current last_read
+
+  return { messages: [...contextParsed, ...newParsed], userIds };
+}
+
+/** After user resolution, fix up names and clean text in-place */
+function resolveMessageNames(messages: SlackMessage[]): void {
+  for (const msg of messages) {
+    const resolved = msg.sender ? getUserName(msg.sender) : "unknown";
+    // Keep existing senderName (e.g. bot username) if user resolution returned the raw ID
+    msg.senderName = (resolved !== msg.sender) ? resolved : (msg.senderName || resolved);
+    msg.text = cleanSlackTextSync(msg.text);
+    if (msg.replyUserNames) {
+      msg.replyUserNames = msg.replyUserNames.map(u => getUserName(u)).filter(Boolean);
+    }
+  }
+}
+
+// ─── Phased sync ─────────────────────────────────────────────────────
+//
+// Phases (executed sequentially, UI updates after each):
+//   1. DMs — search "to:me", filter to DM channel IDs
+//   2. Mentions — search "<@userId>", filter to non-DM channels
+//   3. Thread mentions — already caught by phase 2 (threads show in search)
+//   4. Subscribed threads — search "from:me has:thread" → conversations.replies
+//   5. All channels — users.conversations → conversations.info → fetch unread
+
+export type SyncPhase = 1 | 2 | 3 | 4 | 5;
+
+/** Fetch messages for a batch of channels, resolve names, return them.
+ *  Batches history calls in groups of 8 to avoid rate limits. */
+async function fetchAndResolve(
+  client: WebClient,
+  channels: ChannelWithUnreads[],
+): Promise<SlackMessage[]> {
+  if (channels.length === 0) return [];
+  const allUserIds = new Set<string>();
+  const messages: SlackMessage[] = [];
+  const batchSize = 8;
+  for (let i = 0; i < channels.length; i += batchSize) {
+    const batch = channels.slice(i, i + batchSize);
+    const results = await Promise.all(batch.map(ch => fetchChannelRaw(client, ch, 3)));
+    for (const { messages: msgs, userIds } of results) {
+      for (const uid of userIds) allUserIds.add(uid);
+      messages.push(...msgs);
+    }
+    if (i + batchSize < channels.length) await sleep(200);
+  }
+  if (allUserIds.size > 0) await resolveUsers(client, [...allUserIds]);
+  resolveMessageNames(messages);
+  return messages;
+}
+
+// ─── Main export: fetch all unread channel messages ──────────────────
 
 export async function fetchChannelMessages(
   userToken: string,
   userId: string,
   onProgress?: (status: string) => void,
-  watchedChannelIds?: string[],
+  _watchedChannelIds?: string[],
   lookbackMinutes?: number,
   onMessages?: (messages: SlackMessage[]) => void,
   activeDmChannelIds?: string[],
+  /** Which phases to run (default: all). Phases 1-2 = urgent, 3-5 = full */
+  phases?: SyncPhase[],
 ): Promise<SlackMessage[]> {
-  const client = new WebClient(userToken);
-  const lookbackSec = (lookbackMinutes ?? 48 * 60) * 60;
-  const oldest = String(Math.floor(Date.now() / 1000) - lookbackSec);
-  const isQuickSync = lookbackMinutes != null && lookbackMinutes < 60;
+  const client = new WebClient(userToken, { retryConfig: { retries: 0 }, rejectRateLimitedCalls: true });
+  const runPhases = new Set(phases ?? [1, 2, 3, 4, 5]);
 
-  // Build list of channels to fetch: watched channels + DMs
-  interface ChannelToFetch {
-    id: string;
-    name: string;
-    isDm: boolean;
-    lastRead: string;
-  }
-
-  const channelsToFetch: ChannelToFetch[] = [];
-
-  // Add watched channels (fetch info + last_read in parallel)
-  if (watchedChannelIds && watchedChannelIds.length > 0) {
-    if (isQuickSync) {
-      // On quick sync, skip conversations.info — use cached names, don't fetch last_read
-      for (const chId of watchedChannelIds) {
-        channelsToFetch.push({ id: chId, name: channelNameCache.get(chId) ?? chId, isDm: false, lastRead: "0" });
-      }
-    } else {
-      const results = await Promise.all(
-        watchedChannelIds.map(async (chId) => {
-          try {
-            const info = await client.conversations.info({ channel: chId });
-            const c = info.channel as Record<string, unknown>;
-            const name = (c?.name as string) ?? chId;
-            const lastRead = (c?.last_read as string) ?? "0";
-            channelNameCache.set(chId, name);
-            return { id: chId, name, isDm: false, lastRead };
-          } catch {
-            return { id: chId, name: channelNameCache.get(chId) ?? chId, isDm: false, lastRead: "0" };
-          }
-        })
-      );
-      channelsToFetch.push(...results);
+  // Prevent concurrent full syncs
+  const isFullSync = runPhases.has(5);
+  if (isFullSync) {
+    if (fullSyncInProgress) {
+      console.log("[slack] Full sync already in progress, skipping");
+      return [];
     }
-  }
-
-  // On quick sync, refresh only the active DM channels (ones currently showing in UI)
-  if (isQuickSync && activeDmChannelIds && activeDmChannelIds.length > 0) {
-    for (const chId of activeDmChannelIds) {
-      channelsToFetch.push({ id: chId, name: channelNameCache.get(chId) ?? `DM: ${chId}`, isDm: true, lastRead: "0" });
-    }
-  }
-
-  // Full sync: discover all DMs and channels with unreads
-  if (!isQuickSync) {
-    onProgress?.("finding DMs");
-    const allDms: { id: string; userId: string; updated: number }[] = [];
-    let cursor: string | undefined;
-    do {
-      const res = await client.conversations.list({
-        types: "im",
-        exclude_archived: true,
-        limit: 200,
-        cursor,
-      });
-      for (const ch of res.channels ?? []) {
-        if (ch.id) {
-          const c = ch as Record<string, unknown>;
-          allDms.push({ id: ch.id, userId: (c.user as string) ?? "", updated: (c.updated as number) ?? 0 });
-        }
-      }
-      cursor = res.response_metadata?.next_cursor || undefined;
-    } while (cursor);
-
-    const cutoff = Math.floor(Date.now() / 1000) - lookbackSec;
-    const activeDms = allDms.filter(dm => dm.updated >= cutoff);
-    console.log(`[slack] ${allDms.length} total DMs, ${activeDms.length} active within lookback`);
-
-    const dmUserIds = activeDms.map((d) => d.userId).filter(Boolean);
-    await resolveUsers(client, dmUserIds);
-
-    for (const dm of activeDms) {
-      channelsToFetch.push({ id: dm.id, name: `DM: ${getUserName(dm.userId)}`, isDm: true, lastRead: "0" });
-    }
-
-    // Discover ALL channels with unread messages (not just watched ones)
-    onProgress?.("checking for unread channels");
-    const allChannelIds: string[] = [];
-    let chCursor: string | undefined;
-    do {
-      const res = await client.users.conversations({
-        types: "public_channel,private_channel",
-        exclude_archived: true,
-        limit: 200,
-        cursor: chCursor,
-      });
-      for (const ch of res.channels ?? []) {
-        if (ch.id) allChannelIds.push(ch.id);
-      }
-      chCursor = res.response_metadata?.next_cursor || undefined;
-    } while (chCursor);
-
-    // Filter out channels we're already fetching
-    const alreadyFetching = new Set(channelsToFetch.map(c => c.id));
-    const channelsToCheck = allChannelIds.filter(id => !alreadyFetching.has(id));
-    console.log(`[slack] Checking ${channelsToCheck.length} channels for unreads (${alreadyFetching.size} already queued)`);
-
-    if (channelsToCheck.length > 0) {
-      const unreadChannels = await discoverUnreadChannels(client, userId, channelsToCheck, onProgress);
-      console.log(`[slack] Found ${unreadChannels.length} additional channels with unread messages`);
-      for (const ch of unreadChannels) {
-        channelsToFetch.push({ id: ch.id, name: ch.name, isDm: false, lastRead: ch.lastRead });
-      }
-    }
-
-    // Also check DMs for unreads — use conversations.info to get last_read
-    const dmIdsToCheck = channelsToFetch.filter(c => c.isDm).map(c => c.id);
-    if (dmIdsToCheck.length > 0) {
-      onProgress?.("checking DM unreads");
-      for (let i = 0; i < dmIdsToCheck.length; i += 10) {
-        const batch = dmIdsToCheck.slice(i, i + 10);
-        await Promise.all(
-          batch.map(async (chId) => {
-            try {
-              const info = await client.conversations.info({ channel: chId });
-              const c = info.channel as Record<string, unknown>;
-              const lastRead = (c?.last_read as string) ?? "0";
-              // Update the lastRead for this DM in our fetch list
-              const entry = channelsToFetch.find(ch => ch.id === chId);
-              if (entry) entry.lastRead = lastRead;
-            } catch { /* skip */ }
-          })
-        );
-      }
-    }
-  }
-
-  onProgress?.(`fetching ${channelsToFetch.length} channels`);
-
-  // Helper for permalink generation (used in multiple code paths)
-  const makePermalink = (channelId: string, ts: string) => {
-    const tsClean = ts.replace(".", "");
-    return `https://app.slack.com/client/${channelId}/p${tsClean}`;
-  };
-
-  // On quick sync with few/no channels, skip heavy history fetch — just use mention search
-  if (isQuickSync && channelsToFetch.length === 0) {
-    const filteredMessages: SlackMessage[] = [];
-    onProgress?.("searching for mentions");
-    try {
-      const mentionRes = await client.search.messages({
-        query: `<@${userId}>`,
-        sort: "timestamp",
-        sort_dir: "desc",
-        count: 20,
-      });
-      const rawMatches = ((mentionRes.messages as Record<string, unknown>)?.matches ?? []) as Array<Record<string, unknown>>;
-      console.log(`[slack] Quick mention search returned ${rawMatches.length} matches`);
-      const mentionUserIds = new Set<string>();
-      const userIdChannelNames = new Set<string>();
-      for (const match of rawMatches) {
-        const ts = match.ts as string;
-        if (!ts || parseFloat(ts) < parseFloat(oldest)) continue;
-        const chObj = match.channel as Record<string, unknown> | undefined;
-        const channelId = chObj?.id as string ?? "";
-        const channelName = chObj?.name as string ?? "";
-        // Skip DM mentions — DMs are fetched through the DM channel path
-        if (channelId.startsWith("D")) continue;
-        const user = match.user as string ?? match.username as string;
-        if (user === userId) continue;
-        if (user) mentionUserIds.add(user);
-        if (channelName && /^[A-Z][A-Z0-9]{8,}$/.test(channelName)) userIdChannelNames.add(channelName);
-        const isThreadReply = !!(match.thread_ts && match.thread_ts !== match.ts);
-        filteredMessages.push({
-          id: `${channelId}-${ts}`,
-          channel: channelId,
-          channelName: channelName || channelNameCache.get(channelId) || channelId,
-          text: cleanSlackTextSync(match.text as string ?? ""),
-          sender: user ?? "",
-          senderName: user ? getUserName(user) : "unknown",
-          threadTs: match.thread_ts as string ?? null,
-          replyCount: 0,
-          replies: [],
-          permalink: match.permalink as string ?? makePermalink(channelId, ts),
-          isUnread: true,
-          timestamp: ts,
-          isThreadReply,
-        });
-      }
-      await resolveUsers(client, [...mentionUserIds, ...userIdChannelNames]);
-      for (const m of filteredMessages) {
-        if (m.sender) m.senderName = getUserName(m.sender);
-        // Fix user-ID-like channel names
-        if (/^[A-Z][A-Z0-9]{8,}$/.test(m.channelName)) {
-          const resolved = getUserName(m.channelName);
-          if (resolved !== m.channelName) m.channelName = resolved;
-        }
-        // DM channels need "DM: " prefix for UI identification
-        if (m.channel.startsWith("D") && !m.channelName.startsWith("DM:")) {
-          m.channelName = `DM: ${m.channelName}`;
-        }
-      }
-    } catch (e) {
-      console.log(`[slack] Quick mention search failed: ${e instanceof Error ? e.message : e}`);
-    }
-    console.log(`[slack] Quick sync: ${filteredMessages.length} mention messages`);
-    filteredMessages.sort((a, b) => parseFloat(b.timestamp) - parseFloat(a.timestamp));
-    return filteredMessages;
-  }
-
-  // Fetch history for all channels in parallel
-  interface SlackFile {
-    name: string;
-    mimetype: string;
-    url: string;
-    thumb?: string;
-  }
-
-  interface RawMsg {
-    channelId: string;
-    channelName: string;
-    isDm: boolean;
-    lastRead: string;
-    user?: string;
-    text: string;
-    ts: string;
-    threadTs?: string;
-    replyCount: number;
-    replyUsers?: string[];
-    files?: SlackFile[];
-    reactions?: { name: string; count: number; users: string[] }[];
+    fullSyncInProgress = true;
   }
 
   const allMessages: SlackMessage[] = [];
-  let fetchedCount = 0;
+  const seenMsgIds = new Set<string>();
+  const fetchedChannelIds = new Set<string>(); // track which channels we've already fetched
 
-  const batchSize = isQuickSync ? 20 : 10;
-  for (let i = 0; i < channelsToFetch.length; i += batchSize) {
-    const batch = channelsToFetch.slice(i, i + batchSize);
-    const batchRaw: RawMsg[] = [];
+  const addMessages = (msgs: SlackMessage[]) => {
+    for (const m of msgs) {
+      if (!seenMsgIds.has(m.id)) {
+        seenMsgIds.add(m.id);
+        allMessages.push(m);
+        fetchedChannelIds.add(m.channel);
+      }
+    }
+    if (onMessages && allMessages.length > 0) {
+      onMessages([...allMessages].sort((a, b) => parseFloat(b.timestamp) - parseFloat(a.timestamp)));
+    }
+  };
 
-    const results = await Promise.all(
-      batch.map(async (ch) => {
-        try {
-          const res = await client.conversations.history({
-            channel: ch.id,
-            oldest,
-            limit: 100,
+  try {
+    const t0 = Date.now();
+
+    // ── Phase 1: DMs ──
+    if (runPhases.has(1)) {
+      onProgress?.("phase 1: checking DMs");
+      const dmChannels = await searchChannels(client, "to:me", 50);
+      // Filter to DM-type channels only
+      const dmsOnly = new Map<string, { name: string; isDm: boolean; userId?: string }>();
+      for (const [id, ch] of dmChannels) {
+        if (ch.isDm) dmsOnly.set(id, ch);
+      }
+      if (dmsOnly.size > 0) {
+        const unread = await filterToUnread(client, dmsOnly);
+        onProgress?.(`phase 1: ${unread.length} DM channels with unreads`);
+        const msgs = await fetchAndResolve(client, unread.slice(0, 20));
+        addMessages(msgs);
+        console.log(`[slack] Phase 1 (DMs): ${msgs.length} msgs in ${Date.now() - t0}ms`);
+      } else {
+        onProgress?.("phase 1: no unread DMs");
+      }
+    }
+
+    // ── Phase 2: Mentions (non-DM channels) ──
+    if (runPhases.has(2)) {
+      const t2 = Date.now();
+      onProgress?.("phase 2: checking mentions");
+      const mentionChannels = await searchChannels(client, `<@${userId}>`, 50);
+      // Filter OUT DM channels (already handled in phase 1)
+      const nonDms = new Map<string, { name: string; isDm: boolean; userId?: string }>();
+      for (const [id, ch] of mentionChannels) {
+        if (!ch.isDm && !fetchedChannelIds.has(id)) nonDms.set(id, ch);
+      }
+      if (nonDms.size > 0) {
+        const unread = await filterToUnread(client, nonDms);
+        onProgress?.(`phase 2: ${unread.length} channels with mentions`);
+        const msgs = await fetchAndResolve(client, unread.slice(0, 20));
+        addMessages(msgs);
+        console.log(`[slack] Phase 2 (mentions): ${msgs.length} msgs in ${Date.now() - t2}ms`);
+      } else {
+        onProgress?.("phase 2: no unread mentions");
+      }
+    }
+
+    // ── Phase 3: Thread mentions (already caught by phase 2 search, but
+    //    we also search "to:me" in non-DM channels for threads where user
+    //    was mentioned but hasn't posted) ──
+    if (runPhases.has(3)) {
+      const t3 = Date.now();
+      onProgress?.("phase 3: checking thread mentions");
+      // "to:me" also catches channels — filter to only ones not yet seen
+      const toMeChannels = await searchChannels(client, "to:me", 50);
+      const newNonDms = new Map<string, { name: string; isDm: boolean; userId?: string }>();
+      for (const [id, ch] of toMeChannels) {
+        if (!ch.isDm && !fetchedChannelIds.has(id)) newNonDms.set(id, ch);
+      }
+      if (newNonDms.size > 0) {
+        const unread = await filterToUnread(client, newNonDms);
+        const msgs = await fetchAndResolve(client, unread.slice(0, 15));
+        addMessages(msgs);
+        console.log(`[slack] Phase 3 (thread mentions): ${msgs.length} msgs in ${Date.now() - t3}ms`);
+      }
+    }
+
+    // ── Phase 4: Subscribed threads with unread replies ──
+    if (runPhases.has(4)) {
+      const t4 = Date.now();
+      onProgress?.("phase 4: checking subscribed threads");
+      try {
+        const threadMsgs = await fetchUnreadThreads(client, userId);
+        addMessages(threadMsgs);
+        console.log(`[slack] Phase 4 (threads): ${threadMsgs.length} msgs in ${Date.now() - t4}ms`);
+      } catch (e) {
+        console.error(`[slack] Phase 4 failed: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+
+    // ── Phase 5: All joined channels (not DMs — those are Phase 1) ──
+    // users.conversations with public_channel+private_channel returns only
+    // actual channels (~30-40), NOT the 800+ DMs/mpims.
+    if (runPhases.has(5)) {
+      const t5 = Date.now();
+      // Brief pause for rate limit recovery from phases 1-4
+      onProgress?.("phase 5: checking joined channels...");
+      await sleep(5_000);
+      try {
+        let cursor: string | undefined;
+        const candidates: { id: string; name: string }[] = [];
+        do {
+          const res = await client.users.conversations({
+            types: "public_channel,private_channel",
+            exclude_archived: true,
+            limit: 200,
+            cursor,
           });
-          const msgs: RawMsg[] = [];
-          for (const msg of res.messages ?? []) {
-            const allowedSubtypes = new Set(["thread_broadcast", "file_share", "me_message"]);
-            if (msg.subtype && !allowedSubtypes.has(msg.subtype)) continue;
-            // Extract file attachments (images, etc.)
-            const rawMsg = msg as Record<string, unknown>;
-            const rawFiles = rawMsg.files as Array<Record<string, unknown>> | undefined;
-            const files: SlackFile[] = [];
-            if (rawFiles) {
-              for (const f of rawFiles) {
-                const mimetype = (f.mimetype as string) ?? "";
-                const url = (f.url_private as string) ?? (f.permalink as string) ?? "";
-                if (url) {
-                  files.push({
-                    name: (f.name as string) ?? "file",
-                    mimetype,
-                    url,
-                    thumb: (f.thumb_360 as string) ?? (f.thumb_480 as string) ?? undefined,
-                  });
-                }
-              }
-            }
-            // Extract reactions
-            const rawReactions = rawMsg.reactions as Array<{ name: string; count: number; users: string[] }> | undefined;
-            const reactions = rawReactions?.map(r => ({ name: r.name, count: r.count, users: r.users ?? [] }));
-
-            msgs.push({
-              channelId: ch.id,
-              channelName: ch.name,
-              isDm: ch.isDm,
-              lastRead: ch.lastRead,
-              user: msg.user,
-              text: msg.text ?? "",
-              ts: msg.ts ?? "",
-              threadTs: rawMsg.thread_ts as string | undefined,
-              replyCount: rawMsg.reply_count as number ?? 0,
-              replyUsers: rawMsg.reply_users as string[] | undefined,
-              files: files.length > 0 ? files : undefined,
-              reactions: reactions && reactions.length > 0 ? reactions : undefined,
-            });
+          for (const ch of res.channels ?? []) {
+            if (!ch.id || fetchedChannelIds.has(ch.id)) continue;
+            const name = (ch as Record<string, unknown>).name as string ?? ch.id;
+            candidates.push({ id: ch.id, name });
           }
-          return msgs;
-        } catch (e) {
-          console.log(`[slack] Failed to fetch ${ch.name}: ${e instanceof Error ? e.message : e}`);
-          return [];
+          cursor = res.response_metadata?.next_cursor || undefined;
+        } while (cursor);
+
+        onProgress?.(`phase 5: checking ${candidates.length} channels for unreads`);
+
+        // Use conversations.info to get last_read (batched to respect Tier 3)
+        const channelMap = new Map<string, { name: string; isDm: boolean }>();
+        for (const ch of candidates) channelMap.set(ch.id, { name: ch.name, isDm: false });
+        const unreadChannels = await filterToUnread(client, channelMap);
+
+        onProgress?.(`phase 5: ${unreadChannels.length} channels with unreads`);
+
+        if (unreadChannels.length > 0) {
+          const msgs = await fetchAndResolve(client, unreadChannels);
+          addMessages(msgs);
+          console.log(`[slack] Phase 5: ${msgs.length} msgs from ${unreadChannels.length} unread out of ${candidates.length} channels in ${Date.now() - t5}ms`);
+        } else {
+          console.log(`[slack] Phase 5: 0 unread out of ${candidates.length} channels in ${Date.now() - t5}ms`);
         }
-      })
-    );
-    for (const msgs of results) batchRaw.push(...msgs);
-
-    // Resolve users for this batch (including thread reply participants)
-    const batchUserIds = new Set<string>();
-    for (const m of batchRaw) {
-      if (m.user) batchUserIds.add(m.user);
-      for (const match of m.text.matchAll(/<@([A-Z0-9]+)/g)) batchUserIds.add(match[1]);
-      if (m.replyUsers) for (const u of m.replyUsers) batchUserIds.add(u);
+      } catch (e) {
+        console.error(`[slack] Phase 5 failed: ${e instanceof Error ? e.message : e}`);
+      }
     }
-    await resolveUsers(client, [...batchUserIds]);
 
-    // Build messages for this batch
-    const batchMessages: SlackMessage[] = batchRaw.map((m) => ({
-      id: `${m.channelId}-${m.ts}`,
-      channel: m.channelId,
-      channelName: m.channelName,
-      text: cleanSlackTextSync(m.text),
-      sender: m.user ?? "",
-      senderName: m.user ? getUserName(m.user) : "unknown",
-      threadTs: m.threadTs ?? null,
-      replyCount: m.replyCount,
-      replyUserNames: m.replyUsers?.map((u) => getUserName(u)).filter(Boolean),
-      replies: [],
-      permalink: makePermalink(m.channelId, m.ts),
-      isUnread: parseFloat(m.ts) > parseFloat(m.lastRead),
-      timestamp: m.ts,
-      files: m.files,
-      reactions: m.reactions,
-    }));
+    // Save user's own messages for style learning
+    try {
+      const { getDb } = await import("@/lib/db");
+      const db = getDb();
+      const insertStyle = db.prepare(
+        `INSERT OR IGNORE INTO slack_style (channel, text, timestamp) VALUES (?, ?, ?)`
+      );
+      for (const m of allMessages) {
+        if (m.sender === userId && m.text.length > 1) {
+          insertStyle.run(m.channelName, m.text, m.timestamp);
+        }
+      }
+    } catch { /* non-fatal */ }
 
-    allMessages.push(...batchMessages);
-    fetchedCount += batch.length;
-    onProgress?.(`fetched ${fetchedCount}/${channelsToFetch.length} channels (${allMessages.length} messages)`);
-
-    // Emit incremental results
-    if (batchMessages.length > 0 && onMessages) {
-      onMessages(allMessages);
-    }
+    allMessages.sort((a, b) => parseFloat(b.timestamp) - parseFloat(a.timestamp));
+    console.log(`[slack] Sync complete: ${allMessages.length} messages, phases [${[...runPhases].join(",")}] in ${Date.now() - t0}ms`);
+    return allMessages;
+  } finally {
+    if (isFullSync) fullSyncInProgress = false;
   }
-
-  // Save user's own messages for style learning (persists across syncs)
-  try {
-    const { getDb } = await import("@/lib/db");
-    const db = getDb();
-    const insertStyle = db.prepare(
-      `INSERT OR IGNORE INTO slack_style (channel, text, timestamp) VALUES (?, ?, ?)`
-    );
-    for (const m of allMessages) {
-      if (m.sender === userId && m.text.length > 1) {
-        insertStyle.run(m.channelName, m.text, m.timestamp);
-      }
-    }
-  } catch { /* non-fatal */ }
-
-  // Keep all fetched messages — filtering is done in UI
-  const filteredMessages = allMessages;
-
-  // Search for recent @mentions across ALL channels
-  onProgress?.("searching for mentions");
-  try {
-    // On quick sync, only search for @mentions (skip "to:me" which mostly returns DMs)
-    const mentionRes = await client.search.messages({
-      query: `<@${userId}>`,
-      sort: "timestamp",
-      sort_dir: "desc",
-      count: isQuickSync ? 30 : 50,
-    });
-    const rawMatches = ((mentionRes.messages as Record<string, unknown>)?.matches ?? []) as Array<Record<string, unknown>>;
-
-    let toMeMatches: Array<Record<string, unknown>> = [];
-    if (!isQuickSync) {
-      const toMeRes = await client.search.messages({ query: "to:me", sort: "timestamp", sort_dir: "desc", count: 50 });
-      toMeMatches = ((toMeRes.messages as Record<string, unknown>)?.matches ?? []) as Array<Record<string, unknown>>;
-    }
-    const seenTs = new Set<string>();
-    const allSearchMatches: Array<Record<string, unknown>> = [];
-    for (const m of [...rawMatches, ...toMeMatches]) {
-      const key = `${(m.channel as Record<string, unknown>)?.id}-${m.ts}`;
-      if (!seenTs.has(key)) { seenTs.add(key); allSearchMatches.push(m); }
-    }
-    // Fake a combined searchRes shape for the rest of the code
-    const searchRes = { messages: { matches: allSearchMatches, total: allSearchMatches.length } };
-    const matches = searchRes.messages.matches;
-    console.log(`[slack] Mention search returned ${matches.length} combined matches (toMe: ${toMeMatches.length}, raw: ${rawMatches.length})`);
-    if (matches.length > 0) {
-      const sample = matches[0];
-      const chInfo = sample.channel as Record<string, unknown> | undefined;
-      console.log(`[slack] First match channel: ${chInfo?.name ?? chInfo?.id}, ts: ${sample.ts}, user: ${sample.user ?? sample.username}`);
-    }
-    const mentionUserIds = new Set<string>();
-    const mentionMsgs: Array<{channelId: string; channelName: string; user?: string; text: string; ts: string; threadTs?: string; permalink: string}> = [];
-
-    for (const match of matches) {
-      const ts = match.ts as string;
-      if (!ts || parseFloat(ts) < parseFloat(oldest)) continue;
-      const chObj = match.channel as Record<string, unknown> | undefined;
-      const channelId = chObj?.id as string ?? "";
-      const channelName = chObj?.name as string ?? "";
-      // Skip DM mentions — DMs are fetched through the DM channel path with full conversation context
-      // The search API only returns the mention itself, missing later replies from the user
-      if (channelId.startsWith("D")) continue;
-      const user = match.user as string ?? match.username as string;
-      if (user === userId) continue; // skip own messages
-      if (user) mentionUserIds.add(user);
-      mentionMsgs.push({
-        channelId,
-        channelName,
-        user,
-        text: match.text as string ?? "",
-        ts,
-        threadTs: match.thread_ts as string | undefined,
-        permalink: match.permalink as string ?? makePermalink(channelId, ts),
-      });
-    }
-
-    // Also resolve any user IDs that appear as channel names (DM channels)
-    const userIdChannelNames = new Set<string>();
-    for (const m of mentionMsgs) {
-      if (m.channelName && /^[A-Z][A-Z0-9]{8,}$/.test(m.channelName)) {
-        userIdChannelNames.add(m.channelName);
-      }
-    }
-    await resolveUsers(client, [...mentionUserIds, ...userIdChannelNames]);
-
-    // Add mention messages that aren't already in our list
-    const existingIds = new Set(filteredMessages.map(m => m.id));
-    for (const m of mentionMsgs) {
-      const id = `${m.channelId}-${m.ts}`;
-      if (existingIds.has(id)) continue;
-      existingIds.add(id);
-      // Resolve user-ID-like channel names to real names
-      let resolvedChannelName = m.channelName;
-      if (resolvedChannelName && /^[A-Z][A-Z0-9]{8,}$/.test(resolvedChannelName)) {
-        const resolved = getUserName(resolvedChannelName);
-        if (resolved !== resolvedChannelName) resolvedChannelName = resolved;
-      }
-      // DM channels (ID starts with D) need "DM: " prefix for UI identification
-      const isDmChannel = m.channelId.startsWith("D");
-      if (isDmChannel && resolvedChannelName && !resolvedChannelName.startsWith("DM:")) {
-        resolvedChannelName = `DM: ${resolvedChannelName}`;
-      }
-      if (channelNameCache.has(m.channelId)) {
-        // use cached name
-      } else if (resolvedChannelName) {
-        channelNameCache.set(m.channelId, resolvedChannelName);
-      }
-      const isThreadReply = !!(m.threadTs && m.threadTs !== m.ts);
-      filteredMessages.push({
-        id,
-        channel: m.channelId,
-        channelName: resolvedChannelName || channelNameCache.get(m.channelId) || m.channelId,
-        text: cleanSlackTextSync(m.text),
-        sender: m.user ?? "",
-        senderName: m.user ? getUserName(m.user) : "unknown",
-        threadTs: m.threadTs ?? null,
-        replyCount: 0,
-        replies: [],
-        permalink: m.permalink,
-        isUnread: true, // mentions are always treated as unread/actionable
-        timestamp: m.ts,
-        isThreadReply,
-      });
-    }
-    const addedCount = filteredMessages.length - existingIds.size + mentionMsgs.length;
-    console.log(`[slack] Found ${mentionMsgs.length} mention messages within lookback, added new ones to results`);
-  } catch (e) {
-    console.log(`[slack] Mention search failed (may need search:read scope): ${e instanceof Error ? e.message : e}`);
-  }
-
-  console.log(`[slack] ${allMessages.length} total messages, ${filteredMessages.length} after filter`);
-
-  filteredMessages.sort((a, b) => parseFloat(b.timestamp) - parseFloat(a.timestamp));
-  return filteredMessages;
 }
 
+// ─── Thread unread detection ─────────────────────────────────────────
+
 /**
- * Run a full Slack sync on server startup to backfill any messages missed while offline.
- * Uses profile + watched channels from the DB.
+ * Find threads the user is subscribed to that have unread replies.
+ * Uses search "from:me has:thread" to discover threads, then checks
+ * conversations.replies for each to find unread ones.
  */
+async function fetchUnreadThreads(
+  client: WebClient,
+  userId: string,
+  onMessages?: (messages: SlackMessage[]) => void,
+): Promise<SlackMessage[]> {
+  const t0 = Date.now();
+
+  // Search for threads the user participated in
+  const searchRes = await client.search.messages({
+    query: "from:me has:thread",
+    sort: "timestamp",
+    sort_dir: "desc",
+    count: 20,
+  }).catch(() => null);
+
+  if (!searchRes) return [];
+
+  const matches = ((searchRes.messages as Record<string, unknown>)?.matches ?? []) as Array<Record<string, unknown>>;
+
+  // Get unique thread roots (channel + thread_ts)
+  const threads: { channelId: string; channelName: string; threadTs: string }[] = [];
+  const seen = new Set<string>();
+  for (const match of matches) {
+    const ch = match.channel as Record<string, unknown> | undefined;
+    const chId = ch?.id as string;
+    const ts = (match.ts as string) ?? "";
+    // The search result ts IS the thread parent ts for parent messages
+    const threadTs = (match.thread_ts as string) ?? ts;
+    const key = `${chId}-${threadTs}`;
+    if (!chId || seen.has(key)) continue;
+    seen.add(key);
+    const isDm = chId.startsWith("D") || chId.startsWith("G");
+    const name = channelNameCache.get(chId) ?? (ch?.name as string) ?? chId;
+    threads.push({ channelId: chId, channelName: isDm && !name.startsWith("DM:") ? `DM: ${name}` : name, threadTs });
+  }
+
+  console.log(`[slack] Found ${threads.length} threads to check for unreads`);
+  if (threads.length === 0) return [];
+
+  // Check each thread in parallel for unread replies
+  const allMessages: SlackMessage[] = [];
+  const allUserIds = new Set<string>();
+
+  const threadResults = await Promise.all(
+    threads.map(async (thread) => {
+      try {
+        const res = await client.conversations.replies({
+          channel: thread.channelId,
+          ts: thread.threadTs,
+          limit: 20,
+        });
+        const msgs = (res.messages ?? []) as Array<Record<string, unknown>>;
+        if (msgs.length < 2) return null; // No replies
+
+        // Parent message has last_read and subscribed
+        const parent = msgs[0];
+        const lastRead = parent.last_read as string | undefined;
+        const subscribed = parent.subscribed as boolean | undefined;
+        if (!subscribed || !lastRead) return null;
+
+        // Find unread replies (after last_read)
+        const lastReadF = parseFloat(lastRead);
+        const unreadReplies = msgs.slice(1).filter(m => {
+          const ts = parseFloat((m.ts as string) ?? "0");
+          const user = m.user as string;
+          return ts > lastReadF && user !== userId; // Skip own messages
+        });
+
+        if (unreadReplies.length === 0) return null;
+
+        // Get context (last read reply before the unread boundary)
+        const readReplies = msgs.slice(1).filter(m => parseFloat((m.ts as string) ?? "0") <= lastReadF);
+        const contextReplies = readReplies.slice(-2);
+
+        // Collect user IDs
+        for (const m of [...contextReplies, ...unreadReplies]) {
+          if (m.user) allUserIds.add(m.user as string);
+          const text = (m.text as string) ?? "";
+          for (const match of text.matchAll(/<@([A-Z0-9]+)/g)) allUserIds.add(match[1]);
+        }
+
+        // Build parent text summary
+        const parentText = (parent.text as string) ?? "";
+        allUserIds.add(parent.user as string);
+
+        return { thread, parent, parentText, contextReplies, unreadReplies, lastRead };
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  // Resolve all users at once
+  if (allUserIds.size > 0) await resolveUsers(client, [...allUserIds]);
+
+  // Build messages
+  for (const result of threadResults) {
+    if (!result) continue;
+    const { thread, parent, parentText, contextReplies, unreadReplies } = result;
+    const parentUser = (parent.user as string) ?? "";
+
+    // Create a thread parent message with replies inline
+    const threadMsg: SlackMessage = {
+      id: `${thread.channelId}-${thread.threadTs}`,
+      channel: thread.channelId,
+      channelName: thread.channelName,
+      text: cleanSlackTextSync(parentText),
+      sender: parentUser,
+      senderName: getUserName(parentUser),
+      threadTs: thread.threadTs,
+      replyCount: unreadReplies.length,
+      replies: [],
+      permalink: makePermalink(thread.channelId, thread.threadTs),
+      isUnread: true,
+      timestamp: thread.threadTs,
+      hasNewReplies: true,
+      isThreadReply: false,
+    };
+
+    // Add context + unread replies
+    for (const m of contextReplies) {
+      const user = (m.user as string) ?? "";
+      threadMsg.replies.push({
+        sender: user,
+        senderName: getUserName(user),
+        text: cleanSlackTextSync((m.text as string) ?? ""),
+        timestamp: (m.ts as string) ?? "",
+      });
+    }
+    if (!threadMsg.newReplies) threadMsg.newReplies = [];
+    for (const m of unreadReplies) {
+      const user = (m.user as string) ?? "";
+      threadMsg.newReplies.push({
+        sender: user,
+        senderName: getUserName(user),
+        text: cleanSlackTextSync((m.text as string) ?? ""),
+        timestamp: (m.ts as string) ?? "",
+      });
+    }
+
+    allMessages.push(threadMsg);
+  }
+
+  console.log(`[slack] Found ${allMessages.length} threads with unread replies in ${Date.now() - t0}ms`);
+  if (onMessages && allMessages.length > 0) onMessages(allMessages);
+  return allMessages;
+}
+
+// ─── Startup sync ────────────────────────────────────────────────────
+
 export async function startupSlackSync(): Promise<void> {
   try {
     const { getDb, getSetting } = await import("@/lib/db");
@@ -654,15 +765,11 @@ export async function startupSlackSync(): Promise<void> {
       return;
     }
 
-    const watchedRaw = getSetting("slack:watchedChannels");
-    const watchedChannels: string[] = watchedRaw ? JSON.parse(watchedRaw) : [];
-    console.log(`[slack-startup] Starting sync with ${watchedChannels.length} watched channels`);
-
+    console.log("[slack-startup] Starting sync");
     const messages = await fetchChannelMessages(
       profile.slack_token,
       profile.slack_user_id,
       (status) => console.log(`[slack-startup] ${status}`),
-      watchedChannels.length > 0 ? watchedChannels : undefined,
     );
 
     const sourceIds: string[] = [];
@@ -684,13 +791,15 @@ export async function startupSlackSync(): Promise<void> {
   }
 }
 
+// ─── Actions ─────────────────────────────────────────────────────────
+
 export async function sendReply(
   userToken: string,
   channel: string,
   text: string,
   threadTs?: string,
 ): Promise<string | undefined> {
-  const client = new WebClient(userToken);
+  const client = new WebClient(userToken, { retryConfig: { retries: 0 }, rejectRateLimitedCalls: true });
   const res = await client.chat.postMessage({ channel, text, thread_ts: threadTs });
   return res.ts;
 }
@@ -701,7 +810,7 @@ export async function addReaction(
   timestamp: string,
   reaction: string,
 ): Promise<void> {
-  const client = new WebClient(userToken);
+  const client = new WebClient(userToken, { retryConfig: { retries: 0 }, rejectRateLimitedCalls: true });
   await client.reactions.add({ channel, timestamp, name: reaction });
 }
 
@@ -709,10 +818,14 @@ export async function markAsRead(
   userToken: string,
   channel: string,
   timestamp: string,
+  threadTs?: string,
 ): Promise<void> {
-  const client = new WebClient(userToken);
+  const client = new WebClient(userToken, { retryConfig: { retries: 0 }, rejectRateLimitedCalls: true });
   try {
+    // Mark channel as read
     await client.conversations.mark({ channel, ts: timestamp });
+    // Also update our cache so next sync knows this channel is read
+    updateLastReadCache(channel, timestamp);
   } catch (e) {
     console.log(`[slack] Failed to mark ${channel} as read: ${e instanceof Error ? e.message : e}`);
   }

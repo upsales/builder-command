@@ -29,8 +29,17 @@ export async function POST(request: NextRequest) {
       const item = db.prepare("SELECT raw_data FROM items WHERE source = ? AND source_id = ?").get(source, source_id) as { raw_data: string | null } | undefined;
       if (item?.raw_data) {
         const raw = JSON.parse(item.raw_data);
-        if (raw.channel && raw.timestamp) {
-          markAsRead(profile.slack_token, raw.channel, raw.timestamp).catch(() => {});
+        if (raw.channel) {
+          // Find the latest message timestamp in this channel to mark the whole channel as read
+          const allInChannel = db.prepare(
+            "SELECT json_extract(raw_data, '$.timestamp') as ts FROM items WHERE source = 'slack' AND json_extract(raw_data, '$.channel') = ? ORDER BY ts DESC LIMIT 1"
+          ).get(raw.channel) as { ts: string } | undefined;
+          const latestTs = allInChannel?.ts ?? raw.timestamp;
+          if (latestTs) {
+            markAsRead(profile.slack_token, raw.channel, latestTs).catch((e) => {
+              console.error(`[dismiss] Failed to mark ${raw.channel} as read:`, e);
+            });
+          }
         }
       }
     }

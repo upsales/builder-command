@@ -16,6 +16,7 @@ export interface GithubPR {
   draft: boolean;
   mergeable: boolean | null;
   mergeableState: string | null;
+  assignees: string[];
   reviewers: string[];
   checks: { name: string; status: string; conclusion: string | null }[];
   comments: { author: string; body: string; createdAt: string; url: string; path?: string; line?: number }[];
@@ -142,6 +143,7 @@ async function enrichPR(
     url: item.html_url,
     repo,
     author: item.user?.login ?? "unknown",
+    assignees: (item.assignees ?? []).map((a: { login: string }) => a.login),
     state: item.state,
     reviewRequested,
     draft: false,

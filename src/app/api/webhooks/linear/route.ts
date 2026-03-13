@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getProfile, upsertItem, removeStaleItems, getItems } from "@/lib/items";
+import { notifyChange } from "@/lib/changeNotifier";
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
@@ -62,6 +63,8 @@ export async function POST(request: NextRequest) {
         labels: data.labels?.map((l: { name: string }) => l.name) ?? [],
       }),
     });
+
+    notifyChange();
   }
 
   return NextResponse.json({ ok: true });

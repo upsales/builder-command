@@ -48,7 +48,7 @@ export async function PATCH(request: NextRequest) {
   const db = getDb();
   if (done !== undefined) {
     const wasDone = (db.prepare("SELECT done FROM daily_todos WHERE id = ?").get(id) as { done: number } | undefined)?.done;
-    db.prepare("UPDATE daily_todos SET done = ? WHERE id = ?").run(done ? 1 : 0, id);
+    db.prepare("UPDATE daily_todos SET done = ?, completed_at = ? WHERE id = ?").run(done ? 1 : 0, done ? new Date().toISOString() : null, id);
     if (done && !wasDone) {
       const todoRow = db.prepare("SELECT text FROM daily_todos WHERE id = ?").get(id) as { text: string } | undefined;
       db.prepare("INSERT INTO xp_log (action, source, xp, label) VALUES (?, ?, ?, ?)").run(

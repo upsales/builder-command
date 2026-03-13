@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from "react";
-import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, AlertCircle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, LayoutDashboard, Flame, Zap, Trophy, Plus, Trash2, Square, CheckSquare, Play, Pause, EyeOff, Search, Wrench } from "lucide-react";
+import React, { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from "react";
+import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, AlertCircle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, Flame, Zap, Trophy, Plus, Trash2, Square, CheckSquare, Play, Pause, EyeOff, Search, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 function useLocalStorage<T>(key: string, defaultValue: T): [T, (v: T | ((prev: T) => T)) => void] {
@@ -20,6 +20,19 @@ function useLocalStorage<T>(key: string, defaultValue: T): [T, (v: T | ((prev: T
       localStorage.setItem(key, JSON.stringify(next));
       return next;
     });
+  }, [key]);
+  // Listen for external "force open" events (e.g. scroll-to-item expanding collapsed sections)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.key === key) {
+        const next = detail.value as T;
+        localStorage.setItem(key, JSON.stringify(next));
+        setValue(next);
+      }
+    };
+    window.addEventListener("ls-force", handler);
+    return () => window.removeEventListener("ls-force", handler);
   }, [key]);
   return [value, set];
 }
@@ -102,6 +115,46 @@ const EMOJI_MAP: Record<string, string> = {
 
 function parseSlackEmojis(text: string): string {
   return text.replace(/:([a-z0-9_+-]+):/g, (_m, code) => EMOJI_MAP[code] ?? `:${code}:`);
+}
+
+// Expand collapsed sections and scroll to an item
+function scrollToSourceItem(source: string, sourceId: string) {
+  const elementId = `item-${source}-${sourceId}`;
+  // Force-open the parent section(s) via custom event
+  const sectionLabel = source === "linear" ? "Linear" : source === "github" ? "GitHub" : source === "slack" ? "Slack" : "Calendar";
+  window.dispatchEvent(new CustomEvent("ls-force", { detail: { key: `__cg_${sectionLabel}`, value: true } }));
+
+  const highlightEl = (el: HTMLElement) => {
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("ring-2", "ring-accent/50", "rounded-lg");
+    setTimeout(() => el.classList.remove("ring-2", "ring-accent/50", "rounded-lg"), 2000);
+  };
+
+  // Small delay to let React re-render the expanded section
+  setTimeout(() => {
+    const el = document.getElementById(elementId);
+    if (el) { highlightEl(el); return; }
+    // Element not found — force-open all nested CollapsibleGroup sections
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith("__cg_") && key !== `__cg_${sectionLabel}`) {
+        try { if (!JSON.parse(localStorage.getItem(key)!)) window.dispatchEvent(new CustomEvent("ls-force", { detail: { key, value: true } })); } catch {}
+      }
+    }
+    // Retry after nested groups expand
+    setTimeout(() => {
+      const el2 = document.getElementById(elementId);
+      if (el2) highlightEl(el2);
+    }, 150);
+  }, 100);
+}
+
+// Fix inline bullets/bold patterns that should be on separate lines
+function formatAgentText(text: string): string {
+  return text
+    .replace(/ • /g, "\n• ")           // inline bullets → newlines
+    .replace(/ \* /g, "\n* ")           // inline asterisk bullets
+    .replace(/([.!?:]) {1,2}\*\*/g, "$1\n\n**"); // bold headers after sentences → paragraph break
 }
 
 interface Profile {
@@ -250,7 +303,7 @@ function CustomActionsMenu({ source, context, onAction, onAgentAction, onCreateT
                   <input value={newEmoji} onChange={(e) => setNewEmoji(e.target.value)} className="w-8 bg-background border border-border rounded px-1 py-0.5 text-xs text-center" placeholder="⚡" />
                   <input value={newName} onChange={(e) => setNewName(e.target.value)} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs" placeholder="Action name" />
                 </div>
-                <textarea value={newPrompt} onChange={(e) => setNewPrompt(e.target.value)} className="w-full bg-background border border-border rounded px-2 py-1 text-xs h-16 resize-none" placeholder="Prompt template... Use {title}, {identifier}, {description}, {repo}" />
+                <textarea value={newPrompt} onChange={(e) => setNewPrompt(e.target.value)} className="w-full bg-background border border-border rounded px-2 py-1 text-xs h-32 resize-none" placeholder="Prompt template... Use {title}, {identifier}, {description}, {repo}" />
                 <div className="flex gap-1">
                   <select value={newSource} onChange={(e) => setNewSource(e.target.value as "linear" | "github" | "both")} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs">
                     <option value="both">Both</option>
@@ -357,8 +410,8 @@ export interface ChatPanelHandle {
 const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
   const [chatTab, setChatTab] = useState<"chat" | "agent">("chat");
   const [agentSessionId, setAgentSessionId] = useState<string | null>(null);
-  const [agentSessionData, setAgentSessionData] = useState<{ id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; messages?: string; tool_calls?: string; started_at?: string; completed_at?: string; todoText?: string } | null>(null);
-  const [agentSessions, setAgentSessions] = useState<{ id: string; todo_id: string; status: string; summary?: string; started_at?: string; completed_at?: string }[]>([]);
+  const [agentSessionData, setAgentSessionData] = useState<{ id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; messages?: string; tool_calls?: string; started_at?: string; completed_at?: string; todoText?: string; todo_source?: string; todo_source_id?: string; source_url?: string; source_identifier?: string } | null>(null);
+  const [agentSessions, setAgentSessions] = useState<{ id: string; todo_id: string; status: string; summary?: string; todo_text?: string; started_at?: string; completed_at?: string }[]>([]);
   const [loadingAgentSession, setLoadingAgentSession] = useState(false);
 
   // Poll for agent sessions list
@@ -377,10 +430,7 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
       const res = await fetch(`/api/agent/sessions?session_id=${sessionId}`);
       const data = await res.json();
       if (data) {
-        const todosRes = await fetch("/api/todos?mode=queue");
-        const todos = await todosRes.json();
-        const todo = todos.find((t: { id: string }) => t.id === data.todo_id);
-        setAgentSessionData({ ...data, todoText: todo?.text });
+        setAgentSessionData({ ...data, todoText: data.todo_text ?? data.todoText });
       }
     } finally {
       setLoadingAgentSession(false);
@@ -404,12 +454,18 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
     return () => clearInterval(interval);
   }, [agentSessionId, agentSessionData?.status]);
 
-  // Auto-open a running session when switching to agent tab
+  // Auto-open a running session when switching to agent tab (but not if user just pressed back)
+  const dismissedAgentSession = useRef(false);
   useEffect(() => {
     if (chatTab !== "agent" || agentSessionId) return;
+    if (dismissedAgentSession.current) return;
     const running = agentSessions.find(s => s.status === "running");
     if (running) loadAgentSession(running.id);
   }, [chatTab, agentSessions, agentSessionId, loadAgentSession]);
+  // Reset dismiss flag when switching tabs
+  useEffect(() => {
+    dismissedAgentSession.current = false;
+  }, [chatTab]);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -788,7 +844,7 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
             <div className="flex flex-col h-full">
               {/* Session header */}
               <div className="px-4 py-2.5 border-b border-border/50 flex items-center gap-2">
-                <button onClick={() => { setAgentSessionId(null); setAgentSessionData(null); }} className="text-muted hover:text-foreground transition-colors">
+                <button onClick={() => { dismissedAgentSession.current = true; setAgentSessionId(null); setAgentSessionData(null); }} className="text-muted hover:text-foreground transition-colors">
                   <ChevronLeft size={14} />
                 </button>
                 <div className="flex-1 min-w-0">
@@ -806,11 +862,30 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                   >
                     {agentSessionData.todoText ?? "Task"}
                   </button>
-                  <div className="flex items-center gap-1.5 mt-0.5">
+                  <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                     {agentSessionData.status === "running" && <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Loader2 size={8} className="animate-spin" /> Running</span>}
                     {agentSessionData.status === "completed" && <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={8} /> Done</span>}
                     {agentSessionData.status === "failed" && <span className="text-[9px] text-red-400 flex items-center gap-0.5"><XCircle size={8} /> Failed</span>}
+                    {agentSessionData.status === "incomplete" && <span className="text-[9px] text-amber-400 flex items-center gap-0.5"><AlertCircle size={8} /> Incomplete</span>}
                     {agentSessionData.started_at && <span className="text-[9px] text-muted/40">{new Date(agentSessionData.started_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}</span>}
+                    {agentSessionData.todo_source === "linear" && agentSessionData.todo_source_id && (
+                      <button
+                        onClick={() => scrollToSourceItem("linear", agentSessionData.todo_source_id!)}
+                        className="text-[9px] text-accent/60 hover:text-accent flex items-center gap-0.5 transition-colors"
+                        title="Scroll to Linear issue"
+                      >
+                        <CircleDot size={8} /> {agentSessionData.source_identifier ?? agentSessionData.todo_source_id}
+                      </button>
+                    )}
+                    {agentSessionData.todo_source === "github" && agentSessionData.todo_source_id && (
+                      <button
+                        onClick={() => scrollToSourceItem("github", agentSessionData.todo_source_id!)}
+                        className="text-[9px] text-accent/60 hover:text-accent flex items-center gap-0.5 transition-colors"
+                        title="Scroll to GitHub PR"
+                      >
+                        <GitPullRequest size={8} /> {agentSessionData.source_identifier ?? "PR"}
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -818,8 +893,8 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
               <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3">
                 {(() => {
                   // Parse messages into chat bubbles with inline tool calls
-                  const chatBubbles: { role: "user" | "agent"; text: string; toolNames?: string[] }[] = [];
-                  const allToolCalls = agentSessionData.tool_calls ? JSON.parse(agentSessionData.tool_calls) : [];
+                  const chatBubbles: { role: "user" | "agent"; text: string; toolNames?: string[]; timestamp?: string }[] = [];
+                  const allToolCalls: { tool: string; timestamp?: string }[] = agentSessionData.tool_calls ? JSON.parse(agentSessionData.tool_calls) : [];
                   let toolCallIndex = 0;
                   if (agentSessionData.messages) {
                     try {
@@ -847,15 +922,20 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                           } else if (typeof msg.content === "string" && msg.content.trim()) {
                             texts.push(msg.content);
                           }
-                          // Grab the corresponding tool calls from the log
                           const msgToolCalls = allToolCalls.slice(toolCallIndex, toolCallIndex + toolCount);
                           toolCallIndex += toolCount;
-                          const toolNames = msgToolCalls.map((tc: { tool: string }) => tc.tool);
+                          const toolNames = msgToolCalls.map(tc => tc.tool);
+                          const timestamp = msgToolCalls[0]?.timestamp;
                           if (texts.length > 0) {
-                            chatBubbles.push({ role: "agent", text: texts.join("\n\n"), toolNames: toolNames.length > 0 ? toolNames : undefined });
+                            chatBubbles.push({ role: "agent", text: texts.join("\n\n"), toolNames: toolNames.length > 0 ? toolNames : undefined, timestamp });
                           } else if (toolNames.length > 0) {
-                            // Tool-only message — show as its own bubble
-                            chatBubbles.push({ role: "agent", text: "", toolNames });
+                            // Tool-only turn — attach to previous agent bubble if possible
+                            const prev = chatBubbles[chatBubbles.length - 1];
+                            if (prev && prev.role === "agent") {
+                              prev.toolNames = [...(prev.toolNames ?? []), ...toolNames];
+                            } else {
+                              chatBubbles.push({ role: "agent", text: "", toolNames, timestamp });
+                            }
                           }
                         }
                       }
@@ -863,45 +943,106 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                   }
                   if (chatBubbles.length === 0 && (agentSessionData.summary || agentSessionData.failure_reason)) {
                     chatBubbles.push({ role: "user", text: agentSessionData.todoText ?? "Task" });
-                    if (agentSessionData.summary) chatBubbles.push({ role: "agent", text: agentSessionData.summary });
-                    if (agentSessionData.failure_reason) chatBubbles.push({ role: "agent", text: agentSessionData.failure_reason });
+                    if (agentSessionData.summary) chatBubbles.push({ role: "agent", text: agentSessionData.summary, timestamp: agentSessionData.completed_at });
+                    if (agentSessionData.failure_reason) chatBubbles.push({ role: "agent", text: agentSessionData.failure_reason, timestamp: agentSessionData.completed_at });
                   }
+                  // Assign timestamps: use started_at for first bubble, completed_at for last
+                  if (chatBubbles.length > 0 && !chatBubbles[0].timestamp && agentSessionData.started_at) {
+                    chatBubbles[0].timestamp = agentSessionData.started_at;
+                  }
+                  if (chatBubbles.length > 1 && !chatBubbles[chatBubbles.length - 1].timestamp && agentSessionData.completed_at) {
+                    chatBubbles[chatBubbles.length - 1].timestamp = agentSessionData.completed_at;
+                  }
+
+                  // Group tool names by count (not consecutive — total)
+                  const groupTools = (names: string[]) => {
+                    const map = new Map<string, number>();
+                    for (const n of names) map.set(n, (map.get(n) ?? 0) + 1);
+                    return Array.from(map, ([name, count]) => ({ name, count }));
+                  };
+
+                  let lastDay = "";
                   return (
                     <>
-                      {chatBubbles.map((bubble, i) => (
-                        <div key={i} className={`flex ${bubble.role === "user" ? "justify-end" : "justify-start"}`}>
-                          <div className={`max-w-[85%] ${bubble.role === "user" ? "" : "space-y-1.5"}`}>
-                            {(bubble.text || bubble.role === "user") && (
-                              <div className={`rounded-2xl px-3.5 py-2.5 ${
-                                bubble.role === "user"
-                                  ? "bg-accent/15 text-foreground/90 rounded-br-md"
-                                  : "bg-card border border-border rounded-bl-md"
-                              }`}>
-                                <div className="text-xs leading-relaxed chat-markdown">
-                                  <ReactMarkdown>{bubble.text}</ReactMarkdown>
-                                </div>
+                      {chatBubbles.map((bubble, i) => {
+                        // Day divider
+                        let dayDivider: React.ReactNode = null;
+                        if (bubble.timestamp) {
+                          const day = new Date(bubble.timestamp).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+                          if (day !== lastDay) {
+                            lastDay = day;
+                            dayDivider = (
+                              <div className="flex items-center gap-2 py-2">
+                                <div className="flex-1 border-t border-border/30" />
+                                <span className="text-[9px] text-foreground/50 font-medium">{day}</span>
+                                <div className="flex-1 border-t border-border/30" />
                               </div>
-                            )}
-                            {bubble.toolNames && bubble.toolNames.length > 0 && (
-                              <div className="flex flex-wrap gap-1 px-1">
-                                {bubble.toolNames.map((name: string, j: number) => (
-                                  <span key={j} className="inline-flex items-center gap-0.5 text-[9px] text-purple-400/60 bg-purple-500/5 border border-purple-500/10 rounded px-1.5 py-0.5">
-                                    <Wrench size={7} className="shrink-0" />{name}
-                                  </span>
-                                ))}
+                            );
+                          }
+                        }
+                        const ts = bubble.timestamp ? new Date(bubble.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false }) : null;
+                        return (
+                          <React.Fragment key={i}>
+                            {dayDivider}
+                            <div className={`flex ${bubble.role === "user" ? "justify-end" : "justify-start"}`}>
+                              <div className={`max-w-[85%]`}>
+                                {(bubble.text || bubble.role === "user" || (bubble.toolNames && bubble.toolNames.length > 0)) && (
+                                  <div className={`rounded-2xl px-3.5 py-2.5 ${
+                                    bubble.role === "user"
+                                      ? "bg-accent/15 text-foreground/90 rounded-br-md"
+                                      : "bg-card border border-border rounded-bl-md"
+                                  }`}>
+                                    {bubble.text && (
+                                      <div className="text-xs leading-relaxed chat-markdown">
+                                        <ReactMarkdown>{bubble.role === "agent" ? formatAgentText(bubble.text) : bubble.text}</ReactMarkdown>
+                                      </div>
+                                    )}
+                                    {bubble.toolNames && bubble.toolNames.length > 0 && (
+                                      <div className={`flex flex-wrap gap-1 ${bubble.text ? "mt-1.5 pt-1.5 border-t border-border/30" : ""}`}>
+                                        {groupTools(bubble.toolNames).map((g, j) => (
+                                          <span key={j} className="inline-flex items-center gap-0.5 text-[9px] text-purple-400/60 bg-purple-500/5 border border-purple-500/10 rounded px-1.5 py-0.5">
+                                            <Wrench size={7} className="shrink-0" />{g.name}{g.count > 1 && <span className="text-purple-400/40 ml-0.5">{g.count}x</span>}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                                {ts && <p className={`text-[9px] text-foreground/40 mt-0.5 ${bubble.role === "user" ? "text-right" : "text-left"}`}>{ts}</p>}
                               </div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
+                            </div>
+                          </React.Fragment>
+                        );
+                      })}
                       {agentSessionData.status === "running" && (
                         <div className="flex justify-start">
-                          <div className="bg-card border border-border rounded-2xl rounded-bl-md px-3.5 py-2.5">
-                            <div className="flex items-center gap-1.5 text-xs text-muted">
-                              <Loader2 size={10} className="animate-spin text-purple-400" />
+                          <div className="bg-purple-500/10 border border-purple-500/20 rounded-2xl rounded-bl-md px-3.5 py-2.5">
+                            <div className="flex items-center gap-1.5 text-xs text-purple-400">
+                              <Loader2 size={10} className="animate-spin" />
                               <span>Working...</span>
                             </div>
                           </div>
+                        </div>
+                      )}
+                      {agentSessionData.status === "completed" && (
+                        <div className="flex items-center gap-2 py-2">
+                          <div className="flex-1 border-t border-green-500/20" />
+                          <span className="text-[9px] text-green-400/60 font-medium flex items-center gap-1"><CheckCircle size={8} /> Session complete</span>
+                          <div className="flex-1 border-t border-green-500/20" />
+                        </div>
+                      )}
+                      {agentSessionData.status === "failed" && (
+                        <div className="flex items-center gap-2 py-2">
+                          <div className="flex-1 border-t border-red-500/20" />
+                          <span className="text-[9px] text-red-400/60 font-medium flex items-center gap-1"><XCircle size={8} /> Session failed</span>
+                          <div className="flex-1 border-t border-red-500/20" />
+                        </div>
+                      )}
+                      {agentSessionData.status === "incomplete" && (
+                        <div className="flex items-center gap-2 py-2">
+                          <div className="flex-1 border-t border-amber-500/20" />
+                          <span className="text-[9px] text-amber-400/60 font-medium flex items-center gap-1"><AlertCircle size={8} /> Ran out of rounds — send a follow-up to continue</span>
+                          <div className="flex-1 border-t border-amber-500/20" />
                         </div>
                       )}
                     </>
@@ -910,7 +1051,16 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
               </div>
               {/* Follow-up input */}
               {agentSessionData.status !== "running" && (
-                <AgentFollowUpInput sessionId={agentSessionData.id} onSent={() => loadAgentSession(agentSessionData.id)} />
+                <AgentFollowUpInput sessionId={agentSessionData.id} onSent={(msg) => {
+                  // Optimistically add user message and set status to running
+                  const prevMessages = agentSessionData.messages ? JSON.parse(agentSessionData.messages) : [];
+                  prevMessages.push({ role: "user", content: msg });
+                  setAgentSessionData(prev => prev ? {
+                    ...prev,
+                    status: "running",
+                    messages: JSON.stringify(prevMessages),
+                  } : prev);
+                }} />
               )}
             </div>
           ) : loadingAgentSession ? (
@@ -937,14 +1087,24 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                     <button
                       key={s.id}
                       onClick={() => loadAgentSession(s.id)}
-                      className="w-full text-left bg-card border border-border rounded-lg hover:bg-card-hover transition-colors"
+                      className={`w-full text-left rounded-lg transition-colors ${
+                        s.status === "running"
+                          ? "bg-purple-500/5 border border-purple-500/20 hover:bg-purple-500/10"
+                          : s.status === "failed"
+                            ? "bg-card border border-red-500/15 hover:bg-card-hover"
+                            : "bg-card border border-border hover:bg-card-hover"
+                      }`}
                     >
                       <div className="flex items-center gap-2 px-3 py-2">
                         {s.status === "running" && <Loader2 size={10} className="text-purple-400 animate-spin shrink-0" />}
-                        {s.status === "completed" && <CheckCircle size={10} className="text-green-400 shrink-0" />}
-                        {s.status === "failed" && <XCircle size={10} className="text-red-400 shrink-0" />}
-                        <span className="text-sm font-medium truncate flex-1">{s.summary?.slice(0, 60) ?? "Processing..."}</span>
-                        <span className="text-[9px] text-muted/40 shrink-0">
+                        {s.status === "completed" && <CheckCircle size={10} className="text-green-400/50 shrink-0" />}
+                        {s.status === "incomplete" && <AlertCircle size={10} className="text-amber-400/50 shrink-0" />}
+                        {s.status === "failed" && <XCircle size={10} className="text-red-400/50 shrink-0" />}
+                        <div className="flex-1 min-w-0">
+                          <span className={`text-xs font-medium truncate block ${s.status === "running" ? "text-purple-300" : ""}`}>{s.todo_text ?? s.summary?.slice(0, 60) ?? "Processing..."}</span>
+                          {s.status === "running" && <span className="text-[9px] text-purple-400/50">Running...</span>}
+                        </div>
+                        <span className="text-[9px] text-muted/30 shrink-0">
                           {s.started_at ? new Date(s.started_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) : ""}
                         </span>
                       </div>
@@ -1025,7 +1185,7 @@ export default function Home() {
   }, [setChatCollapsed]);
 
   // Daily todos
-  const [dailyTodos, setDailyTodos] = useState<{ id: string; text: string; done: number; date: string; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number; source?: string | null; source_id?: string | null }[]>([]);
+  const [dailyTodos, setDailyTodos] = useState<{ id: string; text: string; done: number; date: string; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number; source?: string | null; source_id?: string | null; completed_at?: string | null }[]>([]);
   const [agentStatus, setAgentStatus] = useState<{ running: boolean; currentTodoId: string | null; currentTodoText: string | null; queueLength: number } | null>(null);
   const [agentSessions, setAgentSessions] = useState<Record<string, { id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string }>>({});
   const refreshTodos = useCallback(() => {
@@ -1066,7 +1226,7 @@ export default function Home() {
         }
         if (e.key === "n") {
           e.preventDefault();
-          // Focus the todo input (switch to queue tab if needed)
+          // Focus the todo input
           setTimeout(() => (document.getElementById("todo-input") as HTMLInputElement)?.focus(), 100);
         }
       }
@@ -1156,9 +1316,10 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          watchedChannels,
           githubMode,
-          ...(quick ? { slackLookbackMinutes: 120, activeDmChannelIds } : {}),
+          // Quick sync: DMs + mentions + all channels (phases 1-2, 5)
+          // Full sync adds threads (phases 3-4)
+          ...(quick ? { slackPhases: [1, 2, 5] } : {}),
         }),
       });
       const reader = res.body?.getReader();
@@ -1200,38 +1361,50 @@ export default function Home() {
     }
   };
 
-  // Auto-sync: full on first load, quick every 30s
+  // Auto-sync: full on load + every 5min, quick (DMs+mentions) every 60s
   const syncingRef = useRef(false);
   syncingRef.current = syncing;
   const hasInitialSynced = useRef(false);
+  const [nextSyncIn, setNextSyncIn] = useState<number>(60);
+  const [nextFullSyncIn, setNextFullSyncIn] = useState<number>(300);
+  const quickCountdownRef = useRef(60);
+  const fullCountdownRef = useRef(300);
   useEffect(() => {
     if (!profile) return;
     if (!hasInitialSynced.current) {
       hasInitialSynced.current = true;
       handleSync(false);
     }
-    // Quick sync every 30s for near-realtime Slack updates
-    const interval = setInterval(() => {
-      if (!syncingRef.current) handleSync(true);
-    }, 30 * 1000);
-    return () => clearInterval(interval);
+    quickCountdownRef.current = 60;
+    fullCountdownRef.current = 300;
+    // Tick every second for countdown
+    const tick = setInterval(() => {
+      quickCountdownRef.current -= 1;
+      fullCountdownRef.current -= 1;
+      setNextSyncIn(quickCountdownRef.current);
+      setNextFullSyncIn(fullCountdownRef.current);
+      if (quickCountdownRef.current <= 0) {
+        quickCountdownRef.current = 60;
+        if (!syncingRef.current) handleSync(true);
+      }
+      if (fullCountdownRef.current <= 0) {
+        fullCountdownRef.current = 300;
+        quickCountdownRef.current = 60; // reset quick too since full covers everything
+        if (!syncingRef.current) handleSync(false);
+      }
+    }, 1000);
+    return () => clearInterval(tick);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile]);
 
   // Lightweight poll for webhook-triggered changes (every 2s, just checks a counter)
   const lastChangeRef = useRef(0);
-  const [slackSocketLog, setSlackSocketLog] = useState<{ time: string; type: string; detail: string }[]>([]);
-  const [slackSocketRunning, setSlackSocketRunning] = useState(false);
-  const [showSocketLog, setShowSocketLog] = useState(false);
-  const [activeTab, setActiveTab] = useLocalStorage<"dashboard" | "queue">("ui:activeTab", "queue");
   useEffect(() => {
     if (!profile) return;
     const poll = setInterval(async () => {
       try {
         const res = await fetch("/api/changes");
         const data = await res.json();
-        setSlackSocketRunning(!!data.slackSocket);
-        if (data.socketLog) setSlackSocketLog(data.socketLog);
         if (data.agentStatus) setAgentStatus(data.agentStatus);
         if (data.v !== lastChangeRef.current) {
           lastChangeRef.current = data.v;
@@ -1316,16 +1489,6 @@ export default function Home() {
         </div>
 
         {/* Socket status */}
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => setShowSocketLog((p) => !p)}
-            className={`px-1.5 py-0.5 rounded text-[10px] font-medium flex items-center gap-1 transition-colors ${slackSocketRunning ? "bg-green-500/10 text-green-400 hover:bg-green-500/20" : "bg-red-500/10 text-red-400 hover:bg-red-500/20"}`}
-          >
-            <span className={`w-1.5 h-1.5 rounded-full ${slackSocketRunning ? "bg-green-400" : "bg-red-400"}`} />
-            Socket
-          </button>
-        </div>
-
         {/* Agent status */}
         {agentStatus?.running && (
           <div className="flex items-center gap-1.5" title={agentStatus.currentTodoText ? `Working on: ${agentStatus.currentTodoText}` : "Agent processing..."}>
@@ -1336,31 +1499,17 @@ export default function Home() {
           </div>
         )}
 
-        {/* Tab navigation */}
-        <div className="flex items-center gap-0.5 border border-border rounded-lg overflow-hidden">
-          <button
-            onClick={() => setActiveTab("dashboard")}
-            className={`px-2.5 py-1 text-[11px] font-medium transition-all cursor-pointer flex items-center gap-1 ${
-              activeTab === "dashboard" ? "bg-sky-500/20 text-sky-400" : "text-muted hover:text-foreground hover:bg-card-hover"
-            }`}
-          >
-            <LayoutDashboard size={11} /> Overview
-          </button>
-          <button
-            onClick={() => setActiveTab("queue")}
-            className={`px-2.5 py-1 text-[11px] font-semibold transition-all cursor-pointer ${
-              activeTab === "queue" ? "bg-accent/20 text-accent" : "text-muted hover:text-foreground hover:bg-card-hover"
-            }`}
-          >
-            Action Queue
-          </button>
-        </div>
-
-        {/* Sync status */}
-        {syncing && (
+        {/* Sync status / countdown */}
+        {syncing ? (
           <div className="flex items-center gap-1.5 text-[11px] text-muted">
             <Loader2 size={10} className="animate-spin" />
             <span className="truncate max-w-[200px]">{syncStatus ?? "Syncing..."}</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 text-[10px] text-muted/50">
+            <span>quick {nextSyncIn}s</span>
+            <span>·</span>
+            <span>full {Math.floor(nextFullSyncIn / 60)}:{String(nextFullSyncIn % 60).padStart(2, "0")}</span>
           </div>
         )}
 
@@ -1413,7 +1562,8 @@ export default function Home() {
         <div className="px-4 py-1.5 space-y-1 shrink-0">
           {syncErrors.map((err, i) => (
             <div key={i} className="flex items-center gap-2 text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2.5 py-1.5">
-              <XCircle size={10} /> {err}
+              <XCircle size={10} /> <span className="flex-1">{err}</span>
+              <button onClick={() => setSyncErrors(prev => prev.filter((_, j) => j !== i))} className="shrink-0 hover:text-red-300 transition-colors"><X size={12} /></button>
             </div>
           ))}
         </div>
@@ -1458,52 +1608,11 @@ export default function Home() {
                 <p className="text-sm">Hit Sync to pull from your integrations</p>
               </div>
             ) : (
-              <ItemList items={items} setItems={setItems} onDismiss={onDismiss} dailyTodos={dailyTodos} xpData={xpData} onRefreshTodos={refreshTodos} onRefreshXp={refreshXp} onChatAbout={handleChatAbout} repoStatuses={repoStatuses} slackUserId={profile?.slack_user_id ?? undefined} watchedChannels={watchedChannels} availableChannels={availableChannels} onToggleWatchedChannel={toggleWatchedChannel} activeTab={activeTab} agentSessions={agentSessions} githubMode={githubMode} onSetGithubMode={setGithubMode} onOpenAgentSession={(sessionId) => { setChatCollapsed(false); chatRef.current?.openAgentSession(sessionId); }} />
+              <ItemList items={items} setItems={setItems} onDismiss={onDismiss} dailyTodos={dailyTodos} xpData={xpData} onRefreshTodos={refreshTodos} onRefreshXp={refreshXp} onChatAbout={handleChatAbout} repoStatuses={repoStatuses} slackUserId={profile?.slack_user_id ?? undefined} agentSessions={agentSessions} onOpenAgentSession={(sessionId) => { setChatCollapsed(false); chatRef.current?.openAgentSession(sessionId); }} />
             )}
           </div>
         </div>
 
-        {/* Right: Slack Socket Log Panel */}
-        {showSocketLog && (
-          <div className="w-[360px] shrink-0 border-l border-border bg-card flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
-              <span className="text-xs font-bold text-foreground flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${slackSocketRunning ? "bg-green-400 animate-pulse" : "bg-red-400"}`} />
-                Slack Socket Live Log
-              </span>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => fetch("/api/slack/socket-restart", { method: "POST" })}
-                  className="text-[10px] text-accent hover:text-accent-hover px-2 py-0.5 rounded hover:bg-accent/10 transition-colors"
-                >
-                  Restart
-                </button>
-                <button onClick={() => setShowSocketLog(false)} className="text-muted/50 hover:text-muted p-1"><X size={14} /></button>
-              </div>
-            </div>
-            <div className="flex-1 overflow-y-auto p-3">
-              {slackSocketLog.length === 0 ? (
-                <div className="text-[11px] text-muted/50 text-center py-8">No events yet. Waiting for Slack messages...</div>
-              ) : (
-                <div className="space-y-0.5 font-mono">
-                  {slackSocketLog.map((evt, i) => (
-                    <div key={i} className="text-[10px] flex gap-2 py-0.5">
-                      <span className="text-muted/50 shrink-0">{evt.time}</span>
-                      <span className={`shrink-0 w-16 ${
-                        evt.type === "added" ? "text-green-400" :
-                        evt.type === "error" ? "text-red-400" :
-                        evt.type === "connected" ? "text-sky-400" :
-                        evt.type === "skip" || evt.type === "ignored" ? "text-muted/40" :
-                        "text-yellow-400"
-                      }`}>{evt.type}</span>
-                      <span className="text-muted/70 break-all">{evt.detail}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
       </div>
 
       {/* ─── Modals ─── */}
@@ -1634,7 +1743,7 @@ function ActionForm({ form, setForm, onSave, onCancel }: {
         <input value={form.emoji} onChange={(e) => setForm({ ...form, emoji: e.target.value })} className="w-8 bg-card border border-border rounded px-1 py-0.5 text-xs text-center" />
         <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="flex-1 bg-card border border-border rounded px-2 py-0.5 text-xs" placeholder="Action name (e.g. Review, Test)" />
       </div>
-      <textarea value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })} className="w-full bg-card border border-border rounded px-2 py-1 text-xs h-20 resize-none font-mono" placeholder="Prompt template..." />
+      <textarea value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })} className="w-full bg-card border border-border rounded px-2 py-1 text-xs h-32 resize-none font-mono" placeholder="Prompt template..." />
       <div className="flex gap-1">
         <select value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value as "linear" | "github" | "both" })} className="flex-1 bg-card border border-border rounded px-2 py-0.5 text-xs">
           <option value="both">Both</option>
@@ -2145,11 +2254,11 @@ function buildAutoTodos(items: TodoItem[]): AutoTodo[] {
   return autoTodos;
 }
 
-function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTodo, agentSessions, onOpenAgentSession }: {
-  todos: { id: string; text: string; done: number; date: string | null; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number; source?: string | null; source_id?: string | null }[];
+function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agentSessions, onOpenAgentSession }: {
+  todos: { id: string; text: string; done: number; date: string | null; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number; source?: string | null; source_id?: string | null; completed_at?: string | null }[];
   onRefresh: () => void;
-  inProgressTodoId?: string | null;
-  onToggleInProgressTodo?: (id: string) => void;
+  focusedTodoIds?: string[];
+  onToggleFocusTodo?: (id: string) => void;
   agentSessions?: Record<string, { id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string }>;
   onOpenAgentSession?: (sessionId: string) => void;
 }) {
@@ -2320,7 +2429,7 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
   const doneTodos = todos.filter((t) => t.done).reverse();
 
   return (
-    <div className="divide-y divide-border/20">
+    <div className="divide-y divide-border/40">
       {/* Undone todos */}
       {undoneTodos.map((todo) => (
         <div
@@ -2338,6 +2447,13 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
               className={`shrink-0 transition-colors ${completingIds.has(todo.id) ? "text-green-400" : "text-muted/40 hover:text-muted"}`}
             >
               {completingIds.has(todo.id) ? <CheckSquare size={14} /> : <Square size={14} />}
+            </button>
+            <button
+              onClick={() => startNoting(todo.id)}
+              className="shrink-0 opacity-0 group-hover/todo:opacity-100 text-muted/30 hover:text-green-400 transition-all -ml-1"
+              title="Complete with note"
+            >
+              <MessageSquare size={11} />
             </button>
             {editingId === todo.id ? (
               <textarea
@@ -2358,19 +2474,14 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
                 {todo.text}
               </span>
             )}
-          {inProgressTodoId === todo.id && (
-            <span className="text-[9px] text-sky-400 font-medium shrink-0 flex items-center gap-0.5"><Play size={8} fill="currentColor" /> In Progress</span>
+          {focusedTodoIds?.includes(todo.id) && (
+            <span className="text-[9px] text-sky-400 font-medium shrink-0 flex items-center gap-0.5"><Play size={8} fill="currentColor" /> Focused</span>
           )}
           {todo.source && todo.source_id && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                const el = document.getElementById(`item-${todo.source}-${todo.source_id}`);
-                if (el) {
-                  el.scrollIntoView({ behavior: "smooth", block: "center" });
-                  el.classList.add("ring-2", "ring-accent/50", "rounded-lg");
-                  setTimeout(() => el.classList.remove("ring-2", "ring-accent/50", "rounded-lg"), 2000);
-                }
+                if (todo.source && todo.source_id) scrollToSourceItem(todo.source, todo.source_id);
               }}
               className={`text-[9px] shrink-0 flex items-center gap-0.5 hover:underline cursor-pointer ${todo.source === "linear" ? "text-violet-400/60 hover:text-violet-400" : todo.source === "github" ? "text-orange-400/60 hover:text-orange-400" : "text-muted/40 hover:text-muted"}`}
               title={`Scroll to ${todo.source} item`}
@@ -2389,13 +2500,13 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
             if (session.status === "failed") return <span className="text-[9px] text-red-400 font-medium shrink-0 flex items-center gap-0.5"><XCircle size={8} /> Failed</span>;
             return null;
           })()}
-          {onToggleInProgressTodo && (
+          {onToggleFocusTodo && (
             <button
-              onClick={() => onToggleInProgressTodo(todo.id)}
-              className={`opacity-0 group-hover/todo:opacity-100 transition-all p-1 ${inProgressTodoId === todo.id ? "text-sky-400 hover:text-muted !opacity-100" : "text-muted/50 hover:text-sky-400"}`}
-              title={inProgressTodoId === todo.id ? "Stop working" : "Set In Progress"}
+              onClick={() => onToggleFocusTodo(todo.id)}
+              className={`opacity-0 group-hover/todo:opacity-100 transition-all p-1 ${focusedTodoIds?.includes(todo.id) ? "text-sky-400 hover:text-muted !opacity-100" : "text-muted/50 hover:text-sky-400"}`}
+              title={focusedTodoIds?.includes(todo.id) ? "Remove focus" : "Focus"}
             >
-              {inProgressTodoId === todo.id ? <Pause size={13} /> : <Play size={13} />}
+              {focusedTodoIds?.includes(todo.id) ? <Pause size={13} /> : <Play size={13} />}
             </button>
           )}
           <button
@@ -2406,13 +2517,6 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
             <Bot size={13} />
           </button>
           <button
-            onClick={() => startNoting(todo.id)}
-            className="opacity-0 group-hover/todo:opacity-100 text-muted/50 hover:text-green-400 transition-all p-1"
-            title="Complete with note"
-          >
-            <MessageSquare size={13} />
-          </button>
-          <button
             onClick={() => deleteTodo(todo.id)}
             className="opacity-0 group-hover/todo:opacity-100 text-muted/50 hover:text-red-400 transition-all p-1"
           >
@@ -2421,13 +2525,14 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
           </div>
           {notingId === todo.id && (
             <div className="ml-5 mt-1 flex items-center gap-1.5">
-              <input
+              <textarea
                 value={noteText}
                 onChange={(e) => setNoteText(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") submitNote(todo.id); if (e.key === "Escape") setNotingId(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitNote(todo.id); } if (e.key === "Escape") setNotingId(null); }}
                 placeholder="Add a note..."
                 autoFocus
-                className="flex-1 bg-card border border-border rounded px-2 py-1 text-[11px] focus:outline-none focus:border-accent/50"
+                rows={3}
+                className="flex-1 bg-card border border-border rounded px-2 py-1.5 text-[11px] focus:outline-none focus:border-accent/50 resize-y min-h-[60px]"
               />
               <button onClick={() => submitNote(todo.id)} className="text-green-400 hover:text-green-300 text-[10px] font-medium">Done</button>
               <button onClick={() => setNotingId(null)} className="text-muted/50 hover:text-muted text-[10px]">Cancel</button>
@@ -2512,6 +2617,9 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
                     <CheckSquare size={14} />
                   </button>
                   <span className="flex-1 text-xs line-through text-muted decoration-muted/30" data-tooltip={todo.note || undefined}>{todo.text}</span>
+                  {todo.completed_at && (
+                    <span className="text-[9px] text-muted/40 shrink-0">{new Date(todo.completed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                  )}
                   {todo.note && (
                     <span className="text-accent/50 hover:text-accent transition-colors" data-tooltip={todo.note}><MessageSquare size={11} /></span>
                   )}
@@ -2548,24 +2656,18 @@ function TodoSection({ todos, onRefresh, inProgressTodoId, onToggleInProgressTod
   );
 }
 
-function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTodos, onRefreshXp, onChatAbout, repoStatuses, slackUserId, watchedChannels, availableChannels, onToggleWatchedChannel, activeTab, agentSessions, githubMode, onSetGithubMode, onOpenAgentSession }: {
+function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTodos, onRefreshXp, onChatAbout, repoStatuses, slackUserId, agentSessions, onOpenAgentSession }: {
   items: TodoItem[];
   setItems: React.Dispatch<React.SetStateAction<TodoItem[]>>;
   onDismiss: (item: TodoItem) => void;
-  dailyTodos: { id: string; text: string; done: number; date: string; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number; source?: string | null; source_id?: string | null }[];
+  dailyTodos: { id: string; text: string; done: number; date: string; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number; source?: string | null; source_id?: string | null; completed_at?: string | null }[];
   xpData: XpData | null;
   onRefreshTodos: () => void;
   onRefreshXp: () => void;
   onChatAbout: (prompt: string, prInfo?: { repo: string; prNumber: number }) => void;
   repoStatuses: Record<string, string>;
   slackUserId?: string;
-  watchedChannels: string[];
-  availableChannels: { id: string; name: string; isDm: boolean; memberCount?: number }[];
-  onToggleWatchedChannel: (id: string) => void;
-  activeTab: "dashboard" | "queue";
   agentSessions: Record<string, { id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string }>;
-  githubMode?: "author" | "assignee";
-  onSetGithubMode?: (mode: "author" | "assignee") => void;
   onOpenAgentSession?: (sessionId: string) => void;
 }) {
   const [hideDrafts, setHideDrafts] = useLocalStorage("filter:hideDrafts", true);
@@ -2577,8 +2679,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   const [hiddenSlackSendersArr, setHiddenSlackSendersArr] = useLocalStorage<string[]>("filter:hiddenSlackSenders", []);
   const hiddenSlackSenders = new Set(hiddenSlackSendersArr);
   const hiddenCalendars = new Set(hiddenCalendarsArr);
-  const [inProgressCollapsed, setInProgressCollapsed] = useLocalStorage("ui:inProgressCollapsed", false);
-  const [pendingReviewCollapsed, setPendingReviewCollapsed] = useLocalStorage("ui:pendingReviewCollapsed", false);
+  const [activeWorkCollapsed, setActiveWorkCollapsed] = useLocalStorage("ui:activeWorkCollapsed", false);
   const [myTasksCollapsed, setMyTasksCollapsed] = useLocalStorage("ui:myTasksCollapsed", false);
   const [calendarCollapsed, setCalendarCollapsed] = useLocalStorage("ui:calendarCollapsed", false);
   const calendarRef = useRef<HTMLDivElement>(null);
@@ -2600,54 +2701,53 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   const [linearStates, setLinearStates] = useState<{ id: string; name: string; type: string }[]>([]);
   const [linearMembers, setLinearMembers] = useState<{ id: string; name: string; email: string }[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
-  // In-progress item (pinned to top of action queue)
-  const [inProgressKey, setInProgressKey] = useLocalStorage<string | null>("ui:inProgressKey", null);
-  const inProgressItem = inProgressKey ? items.find((i) => `${i.source}:${i.source_id}` === inProgressKey) : null;
-  const inProgressTodoId = inProgressKey?.startsWith("todo:") ? inProgressKey.slice(5) : null;
+  // Focused items (pinned to Active Work section)
+  const [focusedKeysArr, setFocusedKeysArr] = useLocalStorage<string[]>("ui:focusedKeys", []);
+  const focusedKeys = new Set(focusedKeysArr);
+  const focusedItems = items.filter((i) => focusedKeys.has(`${i.source}:${i.source_id}`));
+  const focusedTodoIds = focusedKeysArr.filter(k => k.startsWith("todo:")).map(k => k.slice(5));
   const [fadingOutKey, setFadingOutKey] = useState<string | null>(null);
-  const toggleInProgress = useCallback((item: TodoItem) => {
+  const toggleFocus = useCallback((item: TodoItem) => {
     const key = `${item.source}:${item.source_id}`;
-    if (inProgressKey === key) {
-      // Un-setting — no animation
-      setInProgressKey(null);
+    if (focusedKeys.has(key)) {
+      setFocusedKeysArr(prev => prev.filter(k => k !== key));
     } else {
-      // Setting in progress — fade out first, then move
       setFadingOutKey(key);
       setTimeout(() => {
-        setInProgressKey(key);
+        setFocusedKeysArr(prev => [...prev, key]);
         setFadingOutKey(null);
       }, 300);
     }
-  }, [inProgressKey, setInProgressKey]);
-  const toggleInProgressTodo = useCallback((todoId: string) => {
+  }, [focusedKeys, setFocusedKeysArr]);
+  const toggleFocusTodo = useCallback((todoId: string) => {
     const key = `todo:${todoId}`;
-    setInProgressKey((prev) => prev === key ? null : key);
-  }, [setInProgressKey]);
+    setFocusedKeysArr(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
+  }, [setFocusedKeysArr]);
 
-  // Chat about + set in progress: returns an onChatAbout wrapper for a specific item
+  // Chat about + set focus: returns an onChatAbout wrapper for a specific item
   const chatAboutItem = useCallback((item: TodoItem) => (prompt: string, prInfo?: { repo: string; prNumber: number }) => {
-    setInProgressKey(`${item.source}:${item.source_id}`);
+    const key = `${item.source}:${item.source_id}`;
+    setFocusedKeysArr(prev => prev.includes(key) ? prev : [...prev, key]);
     onChatAbout(prompt, prInfo);
-  }, [setInProgressKey, onChatAbout]);
+  }, [setFocusedKeysArr, onChatAbout]);
 
   const agentActionForItem = useCallback((item: TodoItem) => async (prompt: string) => {
-    setInProgressKey(`${item.source}:${item.source_id}`);
     await fetch("/api/agent/start-from-item", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt, source: item.source, source_id: item.source_id }),
     });
-  }, [setInProgressKey]);
+    onRefreshTodos();
+  }, [onRefreshTodos]);
 
   const createTaskActionForItem = useCallback((item: TodoItem) => async (taskText: string, agentPrompt: string) => {
-    setInProgressKey(`${item.source}:${item.source_id}`);
     await fetch("/api/agent/start-from-item", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: `${taskText}\n\n${agentPrompt}`, source: item.source, source_id: item.source_id }),
     });
     onRefreshTodos();
-  }, [setInProgressKey, onRefreshTodos]);
+  }, [onRefreshTodos]);
 
   const [createTaskModal, setCreateTaskModal] = useState<{ source: string; sourceId: string; defaultText: string } | null>(null);
   const createTaskFromItem = useCallback((source: string, sourceId: string, text: string) => {
@@ -2793,22 +2893,32 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   const urgentSections = buildUrgentSections(filteredItems, slackUserId);
   const totalUrgent = urgentSections.reduce((sum, s) => sum + s.itemIds.size, 0);
 
-  // Helper: is this item currently in-progress? (exclude from sections, but allow fading items through)
-  const isItemInProgress = (i: TodoItem) => inProgressKey === `${i.source}:${i.source_id}` && fadingOutKey !== `${i.source}:${i.source_id}`;
+  // Helper: is this item focused? (exclude from regular sections, but allow fading items through)
+  const isItemFocused = (i: TodoItem) => focusedKeys.has(`${i.source}:${i.source_id}`) && fadingOutKey !== `${i.source}:${i.source_id}`;
   const isItemFadingOut = (i: TodoItem) => fadingOutKey === `${i.source}:${i.source_id}`;
 
+  // Build map: source+source_id -> agent tasks (todos with agent sessions linked to this item)
+  const itemAgentTasks = new Map<string, typeof dailyTodos>();
+  for (const todo of dailyTodos) {
+    if (!todo.source || !todo.source_id) continue;
+    if (!agentSessions[todo.id]) continue;
+    const key = `${todo.source}:${todo.source_id}`;
+    if (!itemAgentTasks.has(key)) itemAgentTasks.set(key, []);
+    itemAgentTasks.get(key)!.push(todo);
+  }
+
   // Filtered items for browse tabs
-  const linearItems = items.filter((i) => {
+  const linearItems = filteredItems.filter((i) => {
     if (i.source !== "linear") return false;
-    if (isItemInProgress(i)) return false;
+    if (isItemFocused(i)) return false;
     const raw = i.raw_data ? JSON.parse(i.raw_data) : {};
     if (hiddenStates.has(raw.state)) return false;
     return true;
   });
 
-  const githubItems = items.filter((i) => {
+  const githubItems = filteredItems.filter((i) => {
     if (i.source !== "github") return false;
-    if (isItemInProgress(i)) return false;
+    if (isItemFocused(i)) return false;
     const raw = i.raw_data ? JSON.parse(i.raw_data) : {};
     if (hideDrafts && raw.draft) return false;
     if (hiddenRepos.has(raw.repo)) return false;
@@ -2831,9 +2941,9 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
     });
   };
 
-  const slackItems = items.filter((i) => {
+  const slackItems = filteredItems.filter((i) => {
     if (i.source !== "slack") return false;
-    if (isItemInProgress(i)) return false;
+    if (isItemFocused(i)) return false;
     if (hiddenSlackSenders.size === 0) return true;
     const raw = i.raw_data ? JSON.parse(i.raw_data) : {};
     const senderName = (raw.senderName ?? raw.sender ?? "").toLowerCase();
@@ -2843,35 +2953,52 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
     return true;
   });
 
-  const githubByRepo = new Map<string, TodoItem[]>();
+  const [githubGroupBy, setGithubGroupBy] = useLocalStorage<"repo" | "author" | "assignee" | "status">("filter:githubGroupBy", "repo");
+  const [githubGroupBy2, setGithubGroupBy2] = useLocalStorage<"none" | "repo" | "author" | "assignee" | "status">("filter:githubGroupBy2", "none");
+
+  function getGithubGroupKey(raw: Record<string, unknown>, mode: string): string {
+    if (mode === "author") return (raw.author as string) ?? "unknown";
+    if (mode === "assignee") {
+      const assignees = (raw.assignees as string[]) ?? [];
+      return assignees.length > 0 ? assignees.join(", ") : "unassigned";
+    }
+    if (mode === "status") {
+      const failing = ((raw.checks as Array<{ conclusion: string }>) ?? []).filter(c => c.conclusion === "failure").length;
+      const conflicts = raw.mergeableState === "dirty";
+      return raw.draft ? "Draft" : failing > 0 ? "Failing checks" : conflicts ? "Has conflicts" : raw.mergeable ? "Ready to merge" : "Open";
+    }
+    return (raw.repo as string) ?? "unknown";
+  }
+
+  const githubGrouped = new Map<string, TodoItem[]>();
   for (const item of githubItems) {
     const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
-    const repo = raw.repo ?? "unknown";
-    if (!githubByRepo.has(repo)) githubByRepo.set(repo, []);
-    githubByRepo.get(repo)!.push(item);
+    const key = getGithubGroupKey(raw, githubGroupBy);
+    if (!githubGrouped.has(key)) githubGrouped.set(key, []);
+    githubGrouped.get(key)!.push(item);
   }
 
   const [linearGroupBy, setLinearGroupBy] = useLocalStorage<"state" | "project" | "initiative" | "repo">("filter:linearGroupBy", "state");
+  const [linearGroupBy2, setLinearGroupBy2] = useLocalStorage<"none" | "state" | "project" | "initiative" | "repo">("filter:linearGroupBy2", "none");
+
+  function getLinearGroupKey(raw: Record<string, unknown>, mode: string): string {
+    if (mode === "repo") {
+      const ghAttachment = ((raw.attachments as Array<{ sourceType?: string; url?: string }>) ?? []).find(a => a.sourceType === "github" && a.url);
+      if (ghAttachment) {
+        const match = ghAttachment.url.match(/github\.com\/([^/]+\/[^/]+)/);
+        return match ? match[1] : "No Repo";
+      }
+      return "No Repo";
+    }
+    if (mode === "project") return (raw.project as string) ?? "No Project";
+    if (mode === "initiative") return (raw.initiative as string) ?? "No Initiative";
+    return (raw.state as string) ?? "Unknown";
+  }
 
   const linearGrouped = new Map<string, TodoItem[]>();
   for (const item of linearItems) {
     const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
-    let key: string;
-    if (linearGroupBy === "repo") {
-      const ghAttachment = (raw.attachments ?? []).find((a: { sourceType?: string; url?: string }) => a.sourceType === "github" && a.url);
-      if (ghAttachment) {
-        const match = ghAttachment.url.match(/github\.com\/([^/]+\/[^/]+)/);
-        key = match ? match[1] : "No Repo";
-      } else {
-        key = "No Repo";
-      }
-    } else if (linearGroupBy === "project") {
-      key = raw.project ?? "No Project";
-    } else if (linearGroupBy === "initiative") {
-      key = raw.initiative ?? "No Initiative";
-    } else {
-      key = raw.state ?? "Unknown";
-    }
+    const key = getLinearGroupKey(raw, linearGroupBy);
     if (!linearGrouped.has(key)) linearGrouped.set(key, []);
     linearGrouped.get(key)!.push(item);
   }
@@ -2933,234 +3060,110 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
         {!calendarCollapsed && <CalendarTimeline items={items} onDismiss={onDismiss} hiddenCalendars={hiddenCalendars} onToggleCalendar={toggleCalendar} />}
       </div>
 
-      {/* Tab content + Filters sidebar */}
+      {/* Main content + Filters sidebar */}
       <div className="flex gap-4" style={{ "--sticky-top": `${calendarHeight}px` } as React.CSSProperties}>
       <div className="flex-1 min-w-0">
-      {activeTab === "dashboard" && (() => {
-        const linearItems = filteredItems.filter((i) => i.source === "linear");
-        const ghItems = filteredItems.filter((i) => i.source === "github");
-        const slkItems = filteredItems.filter((i) => i.source === "slack");
-        const calItems = filteredItems.filter((i) => i.source === "calendar");
-
-        // Linear stats
-        const inProgress = linearItems.filter((i) => { const r = JSON.parse(i.raw_data ?? "{}"); return r.state === "In Progress"; }).length;
-        const inReview = linearItems.filter((i) => { const r = JSON.parse(i.raw_data ?? "{}"); return r.state === "In Review"; }).length;
-        const todo = linearItems.filter((i) => { const r = JSON.parse(i.raw_data ?? "{}"); return r.state === "Todo"; }).length;
-        const backlog = linearItems.filter((i) => { const r = JSON.parse(i.raw_data ?? "{}"); return r.state === "Backlog"; }).length;
-
-        // GitHub stats
-        const myPRs = ghItems.filter((i) => { const r = JSON.parse(i.raw_data ?? "{}"); return !r.reviewRequested; }).length;
-        const reviewRequested = ghItems.filter((i) => { const r = JSON.parse(i.raw_data ?? "{}"); return r.reviewRequested; }).length;
-        const withConflicts = ghItems.filter((i) => { const r = JSON.parse(i.raw_data ?? "{}"); return r.mergeableState === "dirty" || r.mergeable === false; }).length;
-        const readyToMerge = ghItems.filter((i) => {
-          const r = JSON.parse(i.raw_data ?? "{}");
-          const checks = r.checks ?? [];
-          return r.mergeable === true && checks.filter((c: { conclusion: string }) => c.conclusion === "failure").length === 0;
-        }).length;
-
-        // Slack stats
-        const dmCount = slkItems.filter((i) => { const r = JSON.parse(i.raw_data ?? "{}"); return r.channelName?.startsWith("DM:"); }).length;
-        const channelCount = slkItems.length - dmCount;
-
-        const statCard = (label: string, value: number, color: string) => (
-          <div className={`bg-card border border-border rounded-lg px-2.5 py-1.5 flex items-center gap-2 ${value > 0 ? "" : "opacity-50"}`}>
-            <div className={`text-lg font-bold ${color} leading-none`}>{value}</div>
-            <div className="text-[10px] text-muted">{label}</div>
-          </div>
-        );
-
-        return (
-          <div className="space-y-2 flex flex-col h-full">
-            {/* Summary cards */}
-            <div className="grid grid-cols-4 gap-1.5">
-              {statCard("Action Items", totalUrgent, "text-red-400")}
-              {statCard("Linear", linearItems.length, "text-violet-400")}
-              {statCard("GitHub", ghItems.length, "text-orange-400")}
-              {statCard("Slack", slkItems.length, "text-emerald-400")}
-            </div>
-
-            {/* Source breakdowns — compact grid */}
-            <div className="grid grid-cols-2 gap-1.5">
-              {linearItems.length > 0 && (
-                <div className="bg-card border border-border rounded-lg p-2">
-                  <h3 className="text-[10px] font-semibold text-violet-400 mb-1 flex items-center gap-1">
-                    <CircleDot size={10} /> Linear
-                  </h3>
-                  <div className="flex gap-3 text-center">
-                    {[[inProgress, "In Prog", "text-blue-400"], [inReview, "Review", "text-violet-400"], [todo, "Todo", "text-muted"], [backlog, "Backlog", "text-muted/50"]].map(([v, l, c]) => (
-                      <div key={l as string}>
-                        <div className={`text-sm font-bold ${c}`}>{v}</div>
-                        <div className="text-[8px] text-muted">{l}</div>
-                      </div>
-                    ))}
-                  </div>
-                  {(() => {
-                    const byPriority = [0, 0, 0, 0, 0];
-                    linearItems.forEach((i) => { const p = JSON.parse(i.raw_data ?? "{}").priority ?? 0; if (p >= 0 && p <= 4) byPriority[p]++; });
-                    const total = linearItems.length;
-                    const colors = ["bg-muted/30", "bg-red-500", "bg-orange-500", "bg-yellow-500", "bg-blue-500"];
-                    return total > 0 ? (
-                      <div className="mt-1.5">
-                        <div className="flex h-1.5 rounded-full overflow-hidden">
-                          {byPriority.map((count, i) => count > 0 ? (
-                            <div key={i} className={`${colors[i]}`} style={{ width: `${(count / total) * 100}%` }} />
-                          ) : null)}
-                        </div>
-                        <div className="flex gap-2 text-[8px] text-muted/50 mt-0.5">
-                          {byPriority[1] > 0 && <span className="text-red-400">{byPriority[1]}urg</span>}
-                          {byPriority[2] > 0 && <span className="text-orange-400">{byPriority[2]}hi</span>}
-                          {byPriority[3] > 0 && <span className="text-yellow-400">{byPriority[3]}med</span>}
-                          {byPriority[4] > 0 && <span className="text-blue-400">{byPriority[4]}low</span>}
-                        </div>
-                      </div>
-                    ) : null;
-                  })()}
-                </div>
-              )}
-
-              {ghItems.length > 0 && (
-                <div className="bg-card border border-border rounded-lg p-2">
-                  <h3 className="text-[10px] font-semibold text-orange-400 mb-1 flex items-center gap-1">
-                    <GitPullRequest size={10} /> GitHub
-                  </h3>
-                  <div className="flex gap-3 text-center">
-                    {[[myPRs, "My PRs", "text-orange-400"], [reviewRequested, "Reviews", "text-accent"], [readyToMerge, "Ready", "text-green-400"], [withConflicts, "Conflicts", "text-red-400"]].map(([v, l, c]) => (
-                      <div key={l as string}>
-                        <div className={`text-sm font-bold ${c}`}>{v}</div>
-                        <div className="text-[8px] text-muted">{l}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {slkItems.length > 0 && (
-                <div className="bg-card border border-border rounded-lg p-2">
-                  <h3 className="text-[10px] font-semibold text-emerald-400 mb-1 flex items-center gap-1">
-                    <MessageSquare size={10} /> Slack
-                  </h3>
-                  <div className="flex gap-3 text-center">
-                    <div><div className="text-sm font-bold text-emerald-400">{channelCount}</div><div className="text-[8px] text-muted">Channels</div></div>
-                    <div><div className="text-sm font-bold text-emerald-300">{dmCount}</div><div className="text-[8px] text-muted">DMs</div></div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Today's Work Summary */}
-            {xpData && xpData.todayActions.length > 0 && (
-              <div className="bg-card border border-border rounded-lg p-2 flex flex-col max-h-[50vh]">
-                <h3 className="text-[10px] font-semibold text-amber-400 mb-1 flex items-center gap-1 shrink-0">
-                  <Zap size={10} /> Today — {xpData.today} XP
-                </h3>
-                <div className="space-y-0.5 overflow-y-auto flex-1">
-                  {xpData.todayActions.map((a, i) => {
-                    const actionIcons: Record<string, string> = {
-                      dismiss: "text-muted/60",
-                      merge_pr: "text-green-400",
-                      complete_todo: "text-yellow-400",
-                      reply_slack: "text-emerald-400",
-                    };
-                    const time = new Date(a.created_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
-                    return (
-                      <div key={i} className="flex items-center gap-2 text-[11px]">
-                        <span className="text-muted/40 font-mono w-10 shrink-0">{time}</span>
-                        <span className={`font-semibold ${actionIcons[a.action] ?? "text-muted"}`}>+{a.xp}</span>
-                        <span className="text-muted truncate">{a.label}</span>
-                        {a.source && <span className={`text-[9px] px-1 py-0.5 rounded ${SOURCE_STYLE[a.source] ?? ""}`}>{a.source}</span>}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-        );
-      })()}
-
-      {activeTab === "queue" && (
         <div className="space-y-4">
-          {/* In Progress — pinned above My Tasks */}
-          {(inProgressItem || inProgressTodoId) && (() => {
-            const inProgressTodo = inProgressTodoId ? dailyTodos.find(t => t.id === inProgressTodoId) : null;
-            return (
-              <div className="space-y-1">
-                <button onClick={() => setInProgressCollapsed(!inProgressCollapsed)} className="w-full flex items-center gap-2 text-xs text-muted mb-1 px-1 hover:text-foreground transition-colors sticky bg-background z-[5] py-0.5" style={{ top: "var(--sticky-top)" }}>
-                  {inProgressCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                  <Play size={10} className="text-sky-400" />
-                  <span>In Progress</span>
-                </button>
-                {!inProgressCollapsed && <div className="bg-sky-500/5 border border-sky-500/30 rounded-lg relative">
-                  <div className="absolute top-0 left-0 w-1 h-full bg-sky-400 rounded-l-lg" />
-                  {inProgressItem?.source === "linear" && (
-                    <LinearCard item={inProgressItem} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} onCreateTaskAction={createTaskActionForItem(inProgressItem)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} onCreateTask={createTaskFromItem} />
-                  )}
-                  {inProgressItem?.source === "github" && (
-                    <GithubCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} onAgentAction={agentActionForItem(inProgressItem)} onCreateTaskAction={createTaskActionForItem(inProgressItem)} repoStatus={repoStatuses[(inProgressItem.raw_data ? JSON.parse(inProgressItem.raw_data) : {}).repo]} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} onCreateTask={createTaskFromItem} />
-                  )}
-                  {inProgressItem?.source === "calendar" && (
-                    <CalendarCard item={inProgressItem} onDismiss={onDismiss} onChatAbout={chatAboutItem(inProgressItem)} isInProgress onToggleInProgress={() => toggleInProgress(inProgressItem)} />
-                  )}
-                  {inProgressItem?.source === "slack" && (
-                    <SlackMessage item={inProgressItem} onDismiss={onDismiss} />
-                  )}
-                  {inProgressTodo && (
-                    <div className="flex items-center gap-2 px-4 py-2.5">
-                      <span className="flex-1 text-xs font-medium">{inProgressTodo.text}</span>
-                      <button onClick={() => toggleInProgressTodo(inProgressTodo.id)} className="text-sky-400 hover:text-muted transition-colors p-1" title="Stop working">
-                        <Pause size={12} />
-                      </button>
-                    </div>
-                  )}
-                </div>}
-              </div>
-            );
-          })()}
-
-          {/* Pending Review — tasks where agent finished but user hasn't checked off */}
+          {/* Active Work — focused items + agent tasks */}
           {(() => {
-            const pendingReview = dailyTodos.filter(t => !t.done && agentSessions[t.id] && (agentSessions[t.id].status === "completed" || agentSessions[t.id].status === "failed" || agentSessions[t.id].status === "incomplete"));
-            if (pendingReview.length === 0) return null;
+            // Agent tasks: todos with running/completed agent sessions (not yet marked done)
+            const agentTasks = dailyTodos.filter(t => !t.done && agentSessions[t.id]);
+            // Focused todos (manual, no agent)
+            const focusedTodos = dailyTodos.filter(t => !t.done && focusedTodoIds.includes(t.id) && !agentSessions[t.id]);
+            const hasActiveWork = focusedItems.length > 0 || focusedTodos.length > 0 || agentTasks.length > 0;
+            if (!hasActiveWork) return null;
             return (
               <div className="space-y-1">
-                <button onClick={() => setPendingReviewCollapsed(!pendingReviewCollapsed)} className="w-full flex items-center gap-2 text-xs text-muted mb-1 px-1 hover:text-foreground transition-colors sticky bg-background z-[5] py-0.5" style={{ top: "var(--sticky-top)" }}>
-                  {pendingReviewCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                  <Bot size={10} className="text-purple-400" />
-                  <span>Pending Review</span>
-                  <span className="text-muted/50">{pendingReview.length}</span>
+                <button onClick={() => setActiveWorkCollapsed(!activeWorkCollapsed)} className="w-full flex items-center gap-2 text-xs text-muted mb-1 px-1 hover:text-foreground transition-colors sticky bg-background z-[5] py-1 relative before:content-[''] before:absolute before:inset-x-0 before:-top-3 before:h-3 before:bg-background" style={{ top: "var(--sticky-top)" }}>
+                  {activeWorkCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                  <Play size={10} className="text-sky-400" />
+                  <span>Active Work</span>
+                  <span className="text-muted/50">{focusedItems.length + focusedTodos.length + agentTasks.length}</span>
                 </button>
-                {!pendingReviewCollapsed && <div className="space-y-1.5">
-                  {pendingReview.map(todo => {
+                {!activeWorkCollapsed && <div className="space-y-1.5">
+                  {/* Focused items — full cards */}
+                  {focusedItems.map(item => (
+                    <div key={`${item.source}:${item.source_id}`} className="bg-sky-500/5 border border-sky-500/30 rounded-lg relative cursor-pointer">
+                      <div className="absolute top-0 left-0 w-1 h-full bg-sky-400 rounded-l-lg" />
+                      {item.source === "linear" && (
+                        <LinearCard item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} />
+                      )}
+                      {item.source === "github" && (
+                        <GithubCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} />
+                      )}
+                      {item.source === "calendar" && (
+                        <CalendarCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} isInProgress onToggleInProgress={() => toggleFocus(item)} />
+                      )}
+                      {item.source === "slack" && (
+                        <SlackMessage item={item} onDismiss={onDismiss} />
+                      )}
+                      {/* Agent tasks linked to this item */}
+                      {itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(todo => {
+                        const session = agentSessions[todo.id];
+                        if (!session) return null;
+                        const isFailed = session.status === "failed";
+                        const isIncomplete = session.status === "incomplete";
+                        const isRunning = session.status === "running";
+                        return (
+                          <div key={todo.id} className="mx-3 mb-2 border-t border-sky-500/20 pt-2">
+                            <div className="flex items-center gap-2">
+                              <button onClick={async () => { await fetch("/api/todos", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: todo.id, done: true }) }); onRefreshTodos(); onRefreshXp(); }} className="shrink-0 text-muted/40 hover:text-green-400 transition-colors" title="Mark as done"><Square size={12} /></button>
+                              <span className="flex-1 text-[11px] truncate">{todo.text}</span>
+                              {isRunning ? <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Loader2 size={9} className="animate-spin" /> Running</span>
+                                : isFailed ? <span className="text-[9px] text-red-400 flex items-center gap-0.5"><XCircle size={9} /> Failed</span>
+                                : isIncomplete ? <span className="text-[9px] text-amber-400 flex items-center gap-0.5"><AlertCircle size={9} /> Incomplete</span>
+                                : <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={9} /> Done</span>}
+                            </div>
+                            <AgentSessionInline session={session} onOpenChat={onOpenAgentSession} onRefresh={onRefreshTodos} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                  {/* Focused todos (manual, not linked to items) */}
+                  {focusedTodos.map(todo => (
+                    <div key={todo.id} className="bg-sky-500/5 border border-sky-500/30 rounded-lg relative px-4 py-2.5">
+                      <div className="absolute top-0 left-0 w-1 h-full bg-sky-400 rounded-l-lg" />
+                      <div className="flex items-center gap-2">
+                        <span className="flex-1 text-xs font-medium">{todo.text}</span>
+                        <button onClick={() => toggleFocusTodo(todo.id)} className="text-sky-400 hover:text-muted transition-colors p-1" title="Remove focus"><Pause size={12} /></button>
+                      </div>
+                    </div>
+                  ))}
+                  {/* Agent tasks NOT linked to a focused item (standalone or linked to unfocused items) */}
+                  {agentTasks.filter(t => {
+                    // Skip if this task is already shown under a focused item above
+                    if (t.source && t.source_id) {
+                      const parentKey = `${t.source}:${t.source_id}`;
+                      if (focusedKeys.has(parentKey)) return false;
+                    }
+                    return true;
+                  }).map(todo => {
                     const session = agentSessions[todo.id];
                     const isFailed = session.status === "failed";
                     const isIncomplete = session.status === "incomplete";
+                    const isRunning = session.status === "running";
+                    const parentItem = todo.source && todo.source_id ? items.find(i => i.source === todo.source && i.source_id === todo.source_id) : null;
+                    const toggleRef = { current: null } as React.MutableRefObject<(() => void) | null>;
                     return (
-                      <div key={todo.id} className={`border rounded-lg p-2.5 ${isFailed ? "bg-red-500/5 border-red-500/20" : isIncomplete ? "bg-amber-500/5 border-amber-500/20" : "bg-purple-500/5 border-purple-500/20"}`}>
+                      <div key={todo.id} onClick={() => toggleRef.current?.()} className={`border rounded-lg p-2.5 cursor-pointer hover:brightness-110 transition-all ${isRunning ? "bg-purple-500/5 border-purple-500/20" : isFailed ? "bg-red-500/5 border-red-500/20" : isIncomplete ? "bg-amber-500/5 border-amber-500/20" : "bg-green-500/5 border-green-500/20"}`}>
                         <div className="flex items-center gap-2">
-                          <button
-                            onClick={async () => {
-                              await fetch("/api/todos", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: todo.id, done: true }) });
-                              onRefreshTodos(); onRefreshXp();
-                            }}
-                            className="shrink-0 text-muted/40 hover:text-green-400 transition-colors"
-                            title="Mark as done"
-                          >
-                            <Square size={14} />
-                          </button>
-                          <span className="flex-1 text-xs font-medium">{todo.text}</span>
-                          {isFailed ? (
-                            <span className="text-[9px] text-red-400 flex items-center gap-0.5"><XCircle size={9} /> Failed</span>
-                          ) : isIncomplete ? (
-                            <span className="text-[9px] text-amber-400 flex items-center gap-0.5"><AlertCircle size={9} /> Incomplete</span>
-                          ) : (
-                            <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={9} /> Done</span>
+                          <button onClick={(e) => { e.stopPropagation(); (async () => { await fetch("/api/todos", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: todo.id, done: true }) }); onRefreshTodos(); onRefreshXp(); })(); }} className="shrink-0 text-muted/40 hover:text-green-400 transition-colors" title="Mark as done"><Square size={14} /></button>
+                          <span className="flex-1 text-xs font-medium truncate">{todo.text}</span>
+                          {parentItem && (
+                            <button onClick={(e) => { e.stopPropagation(); scrollToSourceItem(parentItem.source, parentItem.source_id); }} className={`text-[9px] shrink-0 flex items-center gap-0.5 hover:underline ${todo.source === "linear" ? "text-violet-400/60 hover:text-violet-400" : "text-orange-400/60 hover:text-orange-400"}`}>
+                              {todo.source === "linear" ? <CircleDot size={8} /> : <GitPullRequest size={8} />}
+                              {todo.source_id}
+                            </button>
                           )}
+                          {isRunning ? <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Loader2 size={9} className="animate-spin" /> Running</span>
+                            : isFailed ? <span className="text-[9px] text-red-400 flex items-center gap-0.5"><XCircle size={9} /> Failed</span>
+                            : isIncomplete ? <span className="text-[9px] text-amber-400 flex items-center gap-0.5"><AlertCircle size={9} /> Incomplete</span>
+                            : <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={9} /> Done</span>}
                         </div>
-                        <AgentSessionInline
-                          session={session}
-                          onOpenChat={onOpenAgentSession}
-                          onRefresh={onRefreshTodos}
-                        />
+                        <div onClick={(e) => e.stopPropagation()}>
+                          <AgentSessionInline session={session} onOpenChat={onOpenAgentSession} onRefresh={onRefreshTodos} toggleRef={toggleRef} />
+                        </div>
                       </div>
                     );
                   })}
@@ -3169,15 +3172,15 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
             );
           })()}
 
-          {/* My Tasks section — always visible */}
+          {/* My Tasks section — manual todos only (agent tasks shown in Active Work) */}
           <div className="space-y-1">
-            <button onClick={() => setMyTasksCollapsed(!myTasksCollapsed)} className="w-full flex items-center gap-2 text-xs text-muted mb-1 px-1 hover:text-foreground transition-colors sticky bg-background z-[5] py-0.5" style={{ top: "var(--sticky-top)" }}>
+            <button onClick={() => setMyTasksCollapsed(!myTasksCollapsed)} className="w-full flex items-center gap-2 text-xs text-muted mb-1 px-1 hover:text-foreground transition-colors sticky bg-background z-[5] py-1 relative before:content-[''] before:absolute before:inset-x-0 before:-top-3 before:h-3 before:bg-background" style={{ top: "var(--sticky-top)" }}>
               {myTasksCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
               <CheckSquare size={10} className="text-yellow-400" />
               <span>My Tasks</span>
             </button>
             {!myTasksCollapsed && <div className="bg-card border border-border rounded-lg px-3 py-2">
-              <TodoSection todos={searchedTodos} onRefresh={() => { onRefreshTodos(); onRefreshXp(); }} inProgressTodoId={inProgressTodoId} onToggleInProgressTodo={toggleInProgressTodo} agentSessions={agentSessions} onOpenAgentSession={onOpenAgentSession} />
+              <TodoSection todos={searchedTodos.filter(t => !agentSessions[t.id])} onRefresh={() => { onRefreshTodos(); onRefreshXp(); }} focusedTodoIds={focusedTodoIds} onToggleFocusTodo={toggleFocusTodo} agentSessions={agentSessions} onOpenAgentSession={onOpenAgentSession} />
             </div>}
           </div>
 
@@ -3241,45 +3244,121 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
             );
           })()}
 
-          {/* GitHub section — grouped by repo */}
+          {/* GitHub section — grouped by repo/author/assignee, click twice for nested grouping */}
           {githubItems.length > 0 && (
             <CollapsibleGroup label="GitHub" icon={<GitPullRequest size={10} className="text-orange-400" />} count={githubItems.length} defaultOpen>
-              <div className="space-y-1 ml-3 border-l border-border/30 pl-2">
-                {Array.from(githubByRepo.entries()).map(([repo, repoItems]) => (
-                  <CollapsibleGroup key={repo} label={repo} count={repoItems.length} mono defaultOpen nested>
-                    {repoItems.map((item) => (
-                      <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
-                        <GithubCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} onCreateTask={createTaskFromItem} />
-                      </div>
-                    ))}
-                  </CollapsibleGroup>
-                ))}
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5 px-1 mb-1 sticky bg-background py-1" style={{ top: "calc(var(--sticky-top, 0px) + 24px)", zIndex: 4 }}>
+                  <span className="text-[10px] text-muted/60">Group:</span>
+                  {(["repo", "author", "assignee", "status"] as const).map((mode) => {
+                    const isPrimary = githubGroupBy === mode;
+                    const isSecondary = githubGroupBy2 === mode;
+                    return (
+                      <button key={mode} onClick={() => {
+                        if (isPrimary) {
+                          if (githubGroupBy2 !== "none") { setGithubGroupBy(githubGroupBy2 as typeof githubGroupBy); setGithubGroupBy2("none"); }
+                        } else if (isSecondary) {
+                          setGithubGroupBy2("none");
+                        } else {
+                          setGithubGroupBy2(mode);
+                        }
+                      }}
+                        className={`px-2 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
+                          isPrimary ? "bg-orange-500/20 text-orange-400 border border-orange-500/30" :
+                          isSecondary ? "bg-amber-500/15 text-amber-400/80 border border-amber-500/25" :
+                          "text-muted/50 hover:text-muted"
+                        }`}
+                      >
+                        {mode}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="ml-3 border-l border-border/30 pl-2 space-y-1">
+                  {Array.from(githubGrouped.entries()).map(([group, groupItems]) => (
+                    <CollapsibleGroup key={group} label={group} count={groupItems.length} mono={githubGroupBy === "repo"} defaultOpen stickyOffset={2}>
+                      {githubGroupBy2 !== "none" ? (() => {
+                        const subGrouped = new Map<string, TodoItem[]>();
+                        for (const item of groupItems) {
+                          const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
+                          const subKey = getGithubGroupKey(raw, githubGroupBy2);
+                          if (!subGrouped.has(subKey)) subGrouped.set(subKey, []);
+                          subGrouped.get(subKey)!.push(item);
+                        }
+                        return (<div className="ml-3 border-l border-border/30 pl-2 space-y-1">{Array.from(subGrouped.entries()).map(([subGroup, subItems]) => (
+                          <CollapsibleGroup key={subGroup} label={subGroup} count={subItems.length} mono={githubGroupBy2 === "repo"} defaultOpen stickyOffset={3}>
+                            {subItems.map((item) => (
+                              <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                                <GithubCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
+                              </div>
+                            ))}
+                          </CollapsibleGroup>
+                        ))}</div>);
+                      })() : groupItems.map((item) => (
+                        <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                          <GithubCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
+                        </div>
+                      ))}
+                    </CollapsibleGroup>
+                  ))}
+                </div>
               </div>
             </CollapsibleGroup>
           )}
 
-          {/* Linear section — grouped by state/project/initiative */}
+          {/* Linear section — grouped by state/project/initiative, click twice for nested grouping */}
           {linearItems.length > 0 && (
             <CollapsibleGroup label="Linear" icon={<CircleDot size={10} className="text-violet-400" />} count={linearItems.length} defaultOpen>
               <div className="space-y-1">
-                <div className="flex items-center gap-1.5 px-1 mb-1">
-                  <span className="text-[10px] text-muted/60">Group by:</span>
-                  {(["state", "project", "initiative", "repo"] as const).map((mode) => (
-                    <button key={mode} onClick={() => setLinearGroupBy(mode)}
-                      className={`px-2 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
-                        linearGroupBy === mode ? "bg-violet-500/20 text-violet-400 border border-violet-500/30" : "text-muted/50 hover:text-muted"
-                      }`}
-                    >
-                      {mode}
-                    </button>
-                  ))}
+                <div className="flex items-center gap-1.5 px-1 mb-1 sticky bg-background py-1" style={{ top: "calc(var(--sticky-top, 0px) + 24px)", zIndex: 4 }}>
+                  <span className="text-[10px] text-muted/60">Group:</span>
+                  {(["state", "project", "initiative", "repo"] as const).map((mode) => {
+                    const isPrimary = linearGroupBy === mode;
+                    const isSecondary = linearGroupBy2 === mode;
+                    return (
+                      <button key={mode} onClick={() => {
+                        if (isPrimary) {
+                          if (linearGroupBy2 !== "none") { setLinearGroupBy(linearGroupBy2 as typeof linearGroupBy); setLinearGroupBy2("none"); }
+                        } else if (isSecondary) {
+                          setLinearGroupBy2("none");
+                        } else {
+                          setLinearGroupBy2(mode);
+                        }
+                      }}
+                        className={`px-2 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
+                          isPrimary ? "bg-violet-500/20 text-violet-400 border border-violet-500/30" :
+                          isSecondary ? "bg-fuchsia-500/15 text-fuchsia-400/80 border border-fuchsia-500/25" :
+                          "text-muted/50 hover:text-muted"
+                        }`}
+                      >
+                        {mode}
+                      </button>
+                    );
+                  })}
                 </div>
                 <div className="ml-3 border-l border-border/30 pl-2 space-y-1">
                   {Array.from(linearGrouped.entries()).map(([group, groupItems]) => (
-                    <CollapsibleGroup key={group} label={group} icon={<CircleDot size={10} />} count={groupItems.length} defaultOpen nested>
-                      {groupItems.map((item) => (
+                    <CollapsibleGroup key={group} label={group} icon={<CircleDot size={10} />} count={groupItems.length} defaultOpen stickyOffset={2}>
+                      {linearGroupBy2 !== "none" ? (() => {
+                        const subGrouped = new Map<string, TodoItem[]>();
+                        for (const item of groupItems) {
+                          const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
+                          const subKey = getLinearGroupKey(raw, linearGroupBy2);
+                          if (!subGrouped.has(subKey)) subGrouped.set(subKey, []);
+                          subGrouped.get(subKey)!.push(item);
+                        }
+                        return (<div className="ml-3 border-l border-border/30 pl-2 space-y-1">{Array.from(subGrouped.entries()).map(([subGroup, subItems]) => (
+                          <CollapsibleGroup key={subGroup} label={subGroup} count={subItems.length} defaultOpen stickyOffset={3}>
+                            {subItems.map((item) => (
+                              <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                                <LinearCard item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
+                              </div>
+                            ))}
+                          </CollapsibleGroup>
+                        ))}</div>);
+                      })() : groupItems.map((item) => (
                         <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
-                          <LinearCard item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={`${item.source}:${item.source_id}` === inProgressKey} onToggleInProgress={() => toggleInProgress(item)} onCreateTask={createTaskFromItem} />
+                          <LinearCard item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
                         </div>
                       ))}
                     </CollapsibleGroup>
@@ -3291,7 +3370,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
 
           {/* Recently Hidden */}
           <div>
-            <div className="flex items-center gap-2 text-xs text-muted mb-1 px-1 group/header sticky bg-background z-[5] py-0.5" style={{ top: "var(--sticky-top)" }}>
+            <div className="flex items-center gap-2 text-xs text-muted mb-1 px-1 group/header sticky bg-background z-[5] py-1 relative before:content-[''] before:absolute before:inset-x-0 before:-top-3 before:h-3 before:bg-background" style={{ top: "var(--sticky-top)" }}>
               <button onClick={() => { const next = !showDismissed; setShowDismissed(next); if (next) loadDismissed(); }} className="flex items-center gap-2 hover:text-foreground transition-colors">
                 {showDismissed ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 <EyeOff size={10} className="text-muted/50" />
@@ -3333,7 +3412,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
             )}
           </div>
 
-          {linearItems.length === 0 && githubItems.length === 0 && slackItems.length === 0 && dailyTodos.filter(t => !t.done).length === 0 && !inProgressItem && (
+          {linearItems.length === 0 && githubItems.length === 0 && slackItems.length === 0 && dailyTodos.filter(t => !t.done).length === 0 && focusedItems.length === 0 && (
             <div className="text-center py-8 text-muted">
               <CheckCircle size={32} className="mx-auto mb-3 text-green-400/50" />
               <p className="text-sm font-medium">All clear</p>
@@ -3341,7 +3420,6 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
             </div>
           )}
         </div>
-      )}
       </div>
 
       {/* Filters sidebar */}
@@ -3416,22 +3494,6 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                   Drafts
                 </button>
               </div>
-              {onSetGithubMode && (
-                <div className="mt-1.5">
-                  <h6 className="text-[9px] text-muted/50 mb-0.5">Show PRs by</h6>
-                  <div className="flex gap-1">
-                    {(["author", "assignee"] as const).map((mode) => (
-                      <button key={mode} onClick={() => onSetGithubMode(mode)}
-                        className={`px-1.5 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
-                          githubMode === mode ? "bg-orange-500/20 text-orange-400 border border-orange-500/30" : "text-muted/50 hover:text-muted"
-                        }`}
-                      >
-                        {mode}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
           );
         })()}
@@ -3465,29 +3527,6 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
             </div>
           );
         })()}
-
-        {/* Slack channel filters */}
-        {availableChannels.length > 0 && (
-          <div>
-            <h5 className="text-[10px] text-muted mb-1">Slack Channels</h5>
-            <div className="flex flex-wrap gap-1 max-h-[200px] overflow-y-auto">
-              {availableChannels.filter(ch => !ch.isDm).map(ch => (
-                <button
-                  key={ch.id}
-                  onClick={() => onToggleWatchedChannel(ch.id)}
-                  className={`px-1.5 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
-                    watchedChannels.includes(ch.id)
-                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                      : "bg-card text-muted/30"
-                  }`}
-                >
-                  #{ch.name}
-                </button>
-              ))}
-            </div>
-            <span className="text-[9px] text-muted/40 mt-1 block">{watchedChannels.length} watched</span>
-          </div>
-        )}
 
         {/* Slack sender filters */}
         {(() => {
@@ -3556,13 +3595,16 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
   </>);
 }
 
-function CollapsibleGroup({ label, icon, count, mono, defaultOpen = false, onDismissAll, children, storageKey, nested }: {
-  label: string; icon?: React.ReactNode; count: number; mono?: boolean; defaultOpen?: boolean; onDismissAll?: () => void; children: React.ReactNode; storageKey?: string; nested?: boolean;
+function CollapsibleGroup({ label, icon, count, mono, defaultOpen = false, onDismissAll, children, storageKey, nested, stickyOffset }: {
+  label: string; icon?: React.ReactNode; count: number; mono?: boolean; defaultOpen?: boolean; onDismissAll?: () => void; children: React.ReactNode; storageKey?: string; nested?: boolean; stickyOffset?: number;
 }) {
   const [open, setOpen] = useLocalStorage(storageKey ?? `__cg_${label}`, defaultOpen);
+  const level = stickyOffset ?? (nested ? 1 : 0);
+  const zIndex = Math.max(5 - level, 1);
+  const topPx = `calc(var(--sticky-top, 0px) + ${level * 24}px)`;
   return (
     <div>
-      <div className={`flex items-center gap-2 text-xs text-muted mb-1 px-1 group/header sticky bg-background py-0.5 ${nested ? "z-[4]" : "z-[5]"}`} style={{ top: nested ? "calc(var(--sticky-top, 0px) + 20px)" : "var(--sticky-top, 0px)" }}>
+      <div className={`flex items-center gap-2 text-xs text-muted mb-1 px-1 group/header sticky bg-background py-1 ${level === 0 ? "relative before:content-[''] before:absolute before:inset-x-0 before:-top-3 before:h-3 before:bg-background" : ""}`} style={{ top: topPx, zIndex }}>
         <button onClick={() => setOpen(!open)} className="flex items-center gap-2 hover:text-foreground transition-colors">
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           {icon}
@@ -3586,8 +3628,8 @@ function ExpandableCard({ item, summary, children, onDismiss, onChatAbout, onAge
   const [expanded, setExpanded] = useState(false);
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   return (
-    <div className="bg-card border border-border rounded-lg hover:bg-card-hover transition-colors group">
-      <div className="flex items-center gap-2.5 px-3 py-2 cursor-pointer" onClick={() => setExpanded(!expanded)}>
+    <div className="bg-card border border-border rounded-lg hover:bg-card-hover transition-colors group cursor-pointer" onClick={() => setExpanded(!expanded)}>
+      <div className="flex items-center gap-2.5 px-3 py-2">
         <button className="text-muted shrink-0">
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </button>
@@ -3646,7 +3688,7 @@ const STATE_ICONS: Record<string, string> = {
   "Waiting for Customer": "text-yellow-400",
 };
 
-function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentAction, onCreateTaskAction, onUpdateItem, hiddenStates, isInProgress, onToggleInProgress, onCreateTask }: {
+function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentAction, onCreateTaskAction, onUpdateItem, hiddenStates, isInProgress, onToggleInProgress, onCreateTask, agentTasks }: {
   item: TodoItem;
   states: { id: string; name: string; type: string }[];
   members: { id: string; name: string; email: string }[];
@@ -3659,6 +3701,7 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentActi
   isInProgress?: boolean;
   onToggleInProgress?: () => void;
   onCreateTask?: (source: string, sourceId: string, text: string) => void;
+  agentTasks?: { text: string; status: string }[];
 }) {
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   const [updating, setUpdating] = useState(false);
@@ -3733,6 +3776,12 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentActi
           {raw.project && <span className="text-[10px] text-cyan-400/50">{raw.project}</span>}
           {raw.assignee && <span className="text-[10px] text-muted/50">{raw.assignee.split(" ")[0]}</span>}
           {(raw.updatedAt || raw.createdAt) && <span className="text-[10px] text-muted/40">{formatDate(raw.updatedAt ?? raw.createdAt)}</span>}
+          {agentTasks && agentTasks.length > 0 && agentTasks.map((t, i) => (
+            <span key={i} className={`text-[9px] flex items-center gap-0.5 px-1.5 py-0.5 rounded ${t.status === "running" ? "bg-purple-500/10 text-purple-400" : t.status === "completed" ? "bg-green-500/10 text-green-400" : t.status === "failed" ? "bg-red-500/10 text-red-400" : "bg-amber-500/10 text-amber-400"}`}>
+              {t.status === "running" ? <Loader2 size={8} className="animate-spin" /> : t.status === "completed" ? <CheckCircle size={8} /> : <AlertCircle size={8} />}
+              {t.text.slice(0, 20)}{t.text.length > 20 ? "..." : ""}
+            </span>
+          ))}
         </div>
 
         {/* Actions on hover */}
@@ -3743,7 +3792,7 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentActi
             </button>
           )}
           {onToggleInProgress && (
-            <button onClick={(e) => { e.stopPropagation(); onToggleInProgress(); }} className={`transition-colors p-1 ${isInProgress ? "text-sky-400 hover:text-muted" : "text-muted hover:text-sky-400"}`} title={isInProgress ? "Stop working" : "Set In Progress"}>
+            <button onClick={(e) => { e.stopPropagation(); onToggleInProgress(); }} className={`transition-colors p-1 ${isInProgress ? "text-sky-400 hover:text-muted" : "text-muted hover:text-sky-400"}`} title={isInProgress ? "Remove focus" : "Focus"}>
               {isInProgress ? <Pause size={12} /> : <Play size={12} />}
             </button>
           )}
@@ -3875,7 +3924,7 @@ function LinearCard({ item, states, members, onDismiss, onChatAbout, onAgentActi
   );
 }
 
-function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, onCreateTaskAction, repoStatus, isInProgress, onToggleInProgress, onCreateTask }: { item: TodoItem; onDismiss: (item: TodoItem) => void; onChatAbout: (prompt: string, prInfo?: { repo: string; prNumber: number }) => void; onAgentAction?: (prompt: string) => void; onCreateTaskAction?: (taskText: string, agentPrompt: string) => void; repoStatus?: string; isInProgress?: boolean; onToggleInProgress?: () => void; onCreateTask?: (source: string, sourceId: string, text: string) => void }) {
+function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, onCreateTaskAction, repoStatus, isInProgress, onToggleInProgress, onCreateTask, agentTasks }: { item: TodoItem; onDismiss: (item: TodoItem) => void; onChatAbout: (prompt: string, prInfo?: { repo: string; prNumber: number }) => void; onAgentAction?: (prompt: string) => void; onCreateTaskAction?: (taskText: string, agentPrompt: string) => void; repoStatus?: string; isInProgress?: boolean; onToggleInProgress?: () => void; onCreateTask?: (source: string, sourceId: string, text: string) => void; agentTasks?: { text: string; status: string }[] }) {
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   const [merging, setMerging] = useState(false);
   const [mergeResult, setMergeResult] = useState<string | null>(null);
@@ -3994,6 +4043,12 @@ function GithubCard({ item, onDismiss, onChatAbout, onAgentAction, onCreateTaskA
         {alphaUrl && <a href={alphaUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 bg-cyan-500/10 px-1.5 py-0.5 rounded"><ExternalLink size={9} /> Alpha</a>}
         {comments.length > 0 && <span className="text-[11px] text-muted flex items-center gap-1"><MessageSquare size={10} /> {comments.length}</span>}
         {(raw.updatedAt || raw.createdAt) && <span className="text-[11px] text-muted flex items-center gap-1"><Calendar size={10} /> {formatDate(raw.updatedAt ?? raw.createdAt)}</span>}
+        {agentTasks && agentTasks.length > 0 && agentTasks.map((t, i) => (
+          <span key={i} className={`text-[9px] flex items-center gap-0.5 px-1.5 py-0.5 rounded ${t.status === "running" ? "bg-purple-500/10 text-purple-400" : t.status === "completed" ? "bg-green-500/10 text-green-400" : t.status === "failed" ? "bg-red-500/10 text-red-400" : "bg-amber-500/10 text-amber-400"}`}>
+            {t.status === "running" ? <Loader2 size={8} className="animate-spin" /> : t.status === "completed" ? <CheckCircle size={8} /> : <AlertCircle size={8} />}
+            {t.text.slice(0, 20)}{t.text.length > 20 ? "..." : ""}
+          </span>
+        ))}
       </>
     }>
       {/* Reviewers */}
@@ -4467,24 +4522,21 @@ function SlackText({ text }: { text: string }) {
   return <>{processText(remaining)}</>;
 }
 
-function AgentFollowUpInput({ sessionId, onSent }: { sessionId: string; onSent: () => void }) {
+function AgentFollowUpInput({ sessionId, onSent }: { sessionId: string; onSent: (text: string) => void }) {
   const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
 
-  const send = async () => {
-    if (!text.trim() || sending) return;
-    setSending(true);
-    try {
-      await fetch("/api/agent/trigger", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, follow_up: text }),
-      });
-      setText("");
-      onSent();
-    } finally {
-      setSending(false);
-    }
+  const send = () => {
+    if (!text.trim()) return;
+    const msg = text.trim();
+    setText("");
+    // Notify parent immediately so UI shows the message + working state
+    onSent(msg);
+    // Fire the request — don't block on it
+    fetch("/api/agent/trigger", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, follow_up: msg }),
+    });
   };
 
   return (
@@ -4497,32 +4549,35 @@ function AgentFollowUpInput({ sessionId, onSent }: { sessionId: string; onSent: 
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
           placeholder="Send a follow-up..."
           className="flex-1 bg-background border border-border rounded px-3 py-1.5 text-xs focus:outline-none focus:border-accent"
-          disabled={sending}
         />
         <button
           onClick={send}
-          disabled={sending || !text.trim()}
+          disabled={!text.trim()}
           className="cursor-pointer px-3 py-1.5 rounded bg-purple-600 text-white hover:bg-purple-700 text-xs transition-colors disabled:opacity-50 flex items-center gap-1"
         >
-          {sending ? <Loader2 size={10} className="animate-spin" /> : <Send size={10} />}
+          <Send size={10} />
         </button>
       </div>
     </div>
   );
 }
 
-function AgentSessionInline({ session, onOpenChat, onRefresh }: {
+function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef }: {
   session: { id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string };
   onOpenChat?: (sessionId: string) => void;
   onRefresh?: () => void;
+  toggleRef?: React.MutableRefObject<(() => void) | null>;
 }) {
   const [expanded, setExpanded] = useState(false);
+  useEffect(() => { if (toggleRef) toggleRef.current = () => setExpanded(v => !v); }, [toggleRef]);
   const [fullData, setFullData] = useState<{ messages?: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [followUp, setFollowUp] = useState("");
   const [sending, setSending] = useState(false);
   const [clankerModal, setClankerModal] = useState(false);
-  const isRunning = session.status === "running";
+  const [optimisticMessages, setOptimisticMessages] = useState<{ role: "user" | "agent"; text: string }[]>([]);
+  const [optimisticRunning, setOptimisticRunning] = useState(false);
+  const isRunning = session.status === "running" || optimisticRunning;
 
   // Fetch full session data when expanded
   useEffect(() => {
@@ -4615,8 +4670,9 @@ function AgentSessionInline({ session, onOpenChat, onRefresh }: {
     const text = followUp.trim();
     setFollowUp("");
     setSending(true);
-    // Optimistically add user message to chat
-    chatMessages.push({ role: "user", text });
+    // Optimistically show user message and working state
+    setOptimisticMessages(prev => [...prev, { role: "user", text }]);
+    setOptimisticRunning(true);
     // Fire and forget — don't block UI
     fetch("/api/agent/trigger", {
       method: "POST",
@@ -4624,6 +4680,8 @@ function AgentSessionInline({ session, onOpenChat, onRefresh }: {
       body: JSON.stringify({ session_id: session.id, follow_up: text }),
     }).then(() => {
       setFullData(null); // force re-fetch when done
+      setOptimisticMessages([]);
+      setOptimisticRunning(false);
       onRefresh?.();
     }).finally(() => setSending(false));
   };
@@ -4631,11 +4689,11 @@ function AgentSessionInline({ session, onOpenChat, onRefresh }: {
   return (
     <div className="mt-1.5 mb-1.5">
       <div className="flex items-start gap-1.5 text-xs text-purple-400">
-        <button onClick={() => setExpanded(!expanded)} className="hover:text-purple-300 transition-colors shrink-0 mt-0.5 flex items-center gap-1">
+        <button onClick={() => setExpanded(!expanded)} className="cursor-pointer hover:text-purple-300 transition-colors shrink-0 mt-0.5 flex items-center gap-1">
           {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
           <Bot size={11} />
         </button>
-        <span className="font-medium select-text cursor-text" onClick={(e) => { if (window.getSelection()?.toString()) { e.stopPropagation(); return; } setExpanded(!expanded); }}>
+        <span className="font-medium cursor-pointer" onClick={(e) => { if (window.getSelection()?.toString()) { e.stopPropagation(); return; } setExpanded(!expanded); }}>
           {isRunning ? "Working..." : session.summary ? (session.summary.split("\n")[0].replace(/^\*\*.*?\*\*\s*/, "").replace(/^#+\s*/, "").slice(0, 120) || session.summary.slice(0, 120)) : session.failure_reason ? "Failed" : "Agent result"}
         </span>
       </div>
@@ -4647,7 +4705,7 @@ function AgentSessionInline({ session, onOpenChat, onRefresh }: {
             </div>
           )}
           {/* Q&A history */}
-          {chatMessages.map((msg, i) => (
+          {[...chatMessages, ...optimisticMessages].map((msg, i) => (
             <div key={i}>
               {msg.role === "user" ? (
                 <div className="flex items-start gap-2">
@@ -4657,7 +4715,7 @@ function AgentSessionInline({ session, onOpenChat, onRefresh }: {
               ) : (
                 <div className="bg-card/50 rounded-lg px-3 py-2 border border-border/30">
                   <div className="text-xs text-foreground/80 leading-relaxed chat-markdown">
-                    <ReactMarkdown>{msg.text}</ReactMarkdown>
+                    <ReactMarkdown>{formatAgentText(msg.text)}</ReactMarkdown>
                   </div>
                 </div>
               )}
@@ -5189,10 +5247,29 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
                     <div className="flex-1 h-px bg-red-500/50" />
                   </div>
                 )}
-                <div className="py-1">
+                <div className="py-1 group/reply">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-semibold text-foreground">{reply.senderName}</span>
                     <span className="text-[10px] text-muted/40">{reply.timestamp ? formatTime(reply.timestamp) : ""}</span>
+                    <div className="flex items-center gap-0.5 opacity-0 group-hover/reply:opacity-100 transition-opacity ml-auto">
+                      {[
+                        ["\u{1F44D}", "+1"],
+                        ["\u{2705}", "white_check_mark"],
+                        ["\u{1F440}", "eyes"],
+                      ].map(([emoji, name]) => (
+                        <button key={name} onClick={() => {
+                          fetch("/api/slack/action", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ action: "react", channel: raw.channel, timestamp: reply.timestamp, reaction: name }),
+                          });
+                        }} className="cursor-pointer hover:bg-card-hover rounded px-0.5 py-0.5 hover:scale-125 transition-all text-xs leading-none">{emoji}</button>
+                      ))}
+                      <button onClick={() => { setShowReply(true); setReplyText(`> ${reply.text?.substring(0, 50)}...\n`); }}
+                        className="cursor-pointer text-emerald-400/60 hover:text-emerald-300 rounded px-1 py-0.5 transition-all text-[10px]" title="Reply">
+                        <MessageSquare size={10} />
+                      </button>
+                    </div>
                   </div>
                   <p className="text-xs text-foreground/70 whitespace-pre-wrap leading-relaxed mt-0.5"><SlackText text={reply.text ?? ""} /></p>
                 </div>

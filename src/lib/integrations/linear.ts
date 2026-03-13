@@ -39,79 +39,87 @@ export interface LinearMember {
 }
 
 export async function fetchAssignedIssues(email: string): Promise<LinearItem[]> {
-  const org = await client.organization;
-  const usersRes = await org.users({ first: 100 });
-  const user = usersRes.nodes.find((u) => u.email === email);
-
-  if (!user) {
-    throw new Error(`No Linear user found with email: ${email}`);
-  }
-
-  const issues = await user.assignedIssues({ first: 50 });
-
-  const items: LinearItem[] = [];
-  for (const issue of issues.nodes) {
-    const state = await issue.state;
-    const assignee = await issue.assignee;
-    const labels = await issue.labels();
-    const project = await issue.project;
-    const relations = await issue.relations();
-    const attachments = await issue.attachments();
-
-    // Get initiative from project's parent initiatives
-    let initiative: string | null = null;
-    if (project) {
-      try {
-        const projectInitiatives = await project.initiatives();
-        if (projectInitiatives.nodes.length > 0) {
-          initiative = projectInitiatives.nodes[0].name;
+  // Single GraphQL query instead of ~350 lazy-loaded SDK calls
+  const res = await client.client.rawRequest(
+    `query($email: String!) {
+      users(filter: { email: { eq: $email } }, first: 1) {
+        nodes {
+          assignedIssues(first: 50, orderBy: updatedAt) {
+            nodes {
+              id identifier title description url priority branchName
+              createdAt updatedAt
+              state { id name }
+              assignee { id name }
+              labels { nodes { name } }
+              project {
+                name
+                initiatives { nodes { name } }
+              }
+              relations {
+                nodes {
+                  type
+                  relatedIssue { id identifier }
+                }
+              }
+              attachments {
+                nodes { title url sourceType }
+              }
+            }
+          }
         }
-      } catch {
-        // initiative fetch may fail, that's ok
       }
-    }
+    }`,
+    { email }
+  );
 
-    const relationItems = [];
-    for (const rel of relations.nodes) {
-      const related = await rel.relatedIssue;
-      if (!related) continue;
-      relationItems.push({
-        type: rel.type,
-        relatedIssueId: related.id,
-        relatedIssueIdentifier: related.identifier,
-      });
-    }
+  const data = res.data as Record<string, unknown>;
+  const users = data.users as { nodes: Array<Record<string, unknown>> };
+  const user = users?.nodes?.[0];
+  if (!user) throw new Error(`No Linear user found with email: ${email}`);
 
-    // Attachments include linked PRs (GitHub, GitLab)
-    const attachmentItems = attachments.nodes.map((a) => ({
-      title: a.title,
-      url: a.url,
-      sourceType: a.sourceType ?? undefined,
-    }));
+  const issues = (user.assignedIssues as { nodes: Array<Record<string, unknown>> }).nodes;
 
-    items.push({
-      id: issue.id,
-      identifier: issue.identifier,
-      title: issue.title,
-      description: issue.description ?? null,
-      url: issue.url,
+  return issues.map((issue) => {
+    const state = issue.state as { id: string; name: string } | null;
+    const assignee = issue.assignee as { id: string; name: string } | null;
+    const labels = issue.labels as { nodes: Array<{ name: string }> };
+    const project = issue.project as { name: string; initiatives: { nodes: Array<{ name: string }> } } | null;
+    const relations = issue.relations as { nodes: Array<{ type: string; relatedIssue: { id: string; identifier: string } | null }> };
+    const attachments = issue.attachments as { nodes: Array<{ title: string; url: string; sourceType?: string }> };
+
+    const initiative = project?.initiatives?.nodes?.[0]?.name ?? null;
+
+    return {
+      id: issue.id as string,
+      identifier: issue.identifier as string,
+      title: issue.title as string,
+      description: (issue.description as string) ?? null,
+      url: issue.url as string,
       state: state?.name ?? "Unknown",
       stateId: state?.id ?? "",
-      priority: issue.priority,
+      priority: issue.priority as number,
       assignee: assignee?.name ?? null,
       assigneeId: assignee?.id ?? null,
-      labels: labels.nodes.map((l) => l.name),
-      createdAt: issue.createdAt.toISOString(),
-      updatedAt: issue.updatedAt.toISOString(),
+      labels: labels?.nodes?.map((l) => l.name) ?? [],
+      createdAt: issue.createdAt as string,
+      updatedAt: issue.updatedAt as string,
       project: project?.name ?? null,
       initiative,
-      branchName: issue.branchName ?? null,
-      relations: relationItems,
-      attachments: attachmentItems,
-    });
-  }
-
-  return items;
+      branchName: (issue.branchName as string) ?? null,
+      relations: relations?.nodes
+        ?.filter((r) => r.relatedIssue)
+        .map((r) => ({
+          type: r.type,
+          relatedIssueId: r.relatedIssue!.id,
+          relatedIssueIdentifier: r.relatedIssue!.identifier,
+        })) ?? [],
+      attachments: attachments?.nodes?.map((a) => ({
+        title: a.title,
+        url: a.url,
+        sourceType: a.sourceType ?? undefined,
+      })) ?? [],
+    };
+  });
 }
 
 export async function fetchTeamStates(): Promise<LinearState[]> {
@@ -211,4 +219,80 @@ export async function updateIssueState(issueId: string, stateId: string): Promis
 
 export async function updateIssueAssignee(issueId: string, assigneeId: string | null): Promise<void> {
   await client.updateIssue(issueId, { assigneeId });
+}
+
+/** Re-fetch a single issue by its UUID and return it in the same shape as fetchAssignedIssues */
+export async function fetchSingleIssue(issueId: string): Promise<LinearItem | null> {
+  try {
+    const res = await client.client.rawRequest(
+      `query($id: String!) {
+        issue(id: $id) {
+          id identifier title description url priority branchName
+          createdAt updatedAt
+          state { id name }
+          assignee { id name }
+          labels { nodes { name } }
+          project {
+            name
+            initiatives { nodes { name } }
+          }
+          relations {
+            nodes {
+              type
+              relatedIssue { id identifier }
+            }
+          }
+          attachments {
+            nodes { title url sourceType }
+          }
+        }
+      }`,
+      { id: issueId }
+    );
+
+    const data = res.data as Record<string, unknown>;
+    const issue = data.issue as Record<string, unknown> | null;
+    if (!issue) return null;
+
+    const state = issue.state as { id: string; name: string } | null;
+    const assignee = issue.assignee as { id: string; name: string } | null;
+    const labels = issue.labels as { nodes: Array<{ name: string }> };
+    const project = issue.project as { name: string; initiatives: { nodes: Array<{ name: string }> } } | null;
+    const relations = issue.relations as { nodes: Array<{ type: string; relatedIssue: { id: string; identifier: string } | null }> };
+    const attachments = issue.attachments as { nodes: Array<{ title: string; url: string; sourceType?: string }> };
+    const initiative = project?.initiatives?.nodes?.[0]?.name ?? null;
+
+    return {
+      id: issue.id as string,
+      identifier: issue.identifier as string,
+      title: issue.title as string,
+      description: (issue.description as string) ?? null,
+      url: issue.url as string,
+      state: state?.name ?? "Unknown",
+      stateId: state?.id ?? "",
+      priority: issue.priority as number,
+      assignee: assignee?.name ?? null,
+      assigneeId: assignee?.id ?? null,
+      labels: labels?.nodes?.map((l) => l.name) ?? [],
+      createdAt: issue.createdAt as string,
+      updatedAt: issue.updatedAt as string,
+      project: project?.name ?? null,
+      initiative,
+      branchName: (issue.branchName as string) ?? null,
+      relations: relations?.nodes
+        ?.filter((r) => r.relatedIssue)
+        .map((r) => ({
+          type: r.type,
+          relatedIssueId: r.relatedIssue!.id,
+          relatedIssueIdentifier: r.relatedIssue!.identifier,
+        })) ?? [],
+      attachments: attachments?.nodes?.map((a) => ({
+        title: a.title,
+        url: a.url,
+        sourceType: a.sourceType ?? undefined,
+      })) ?? [],
+    };
+  } catch {
+    return null;
+  }
 }
