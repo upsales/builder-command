@@ -290,6 +290,20 @@ Bad memories: Temporary facts, things already in the work items context.`,
     },
   },
   {
+    name: "schedule_followup",
+    description: `Schedule yourself to wake up later and continue working. Use this for tasks that require waiting — e.g., "check if CI passed in 10 minutes", "verify deployment in 30 minutes", "follow up on Slack thread in 1 hour". Your full conversation history is preserved when you wake up.
+
+When you call this tool, your current session ends. You'll be resumed at the scheduled time with the instruction you provide as context.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        delay: { type: "string", enum: ["5m", "10m", "15m", "30m", "1h", "2h", "4h"], description: "How long to wait before waking up" },
+        instruction: { type: "string", description: "What to do when you wake up — be specific so your future self knows exactly what to check" },
+      },
+      required: ["delay", "instruction"],
+    },
+  },
+  {
     name: "execute_code",
     description: `Execute code in a sandboxed subprocess and return stdout/stderr. Use this as a general-purpose problem-solving tool — data processing, calculations, text parsing, API prototyping, or anything the other tools don't cover.
 
@@ -384,7 +398,7 @@ function executeCodeSandboxed(language: string, code: string): Promise<string> {
 }
 
 // Execute a tool call and return the result
-export async function executeTool(name: string, input: Record<string, unknown>): Promise<string> {
+export async function executeTool(name: string, input: Record<string, unknown>, context?: { sessionId?: string }): Promise<string> {
   try {
     switch (name) {
       case "dismiss_item": {
@@ -592,6 +606,20 @@ export async function executeTool(name: string, input: Record<string, unknown>):
           default:
             return `Unknown browse action: ${action}`;
         }
+      }
+      case "schedule_followup": {
+        if (!context?.sessionId) return "Error: schedule_followup is only available in agent sessions, not chat.";
+        const db = getDb();
+        const id = crypto.randomUUID();
+        const delays: Record<string, number> = {
+          "5m": 5 * 60_000, "10m": 10 * 60_000, "15m": 15 * 60_000,
+          "30m": 30 * 60_000, "1h": 60 * 60_000, "2h": 2 * 60 * 60_000, "4h": 4 * 60 * 60_000,
+        };
+        const ms = delays[input.delay as string] ?? 10 * 60_000;
+        const runAt = new Date(Date.now() + ms).toISOString().replace("T", " ").slice(0, 19);
+        db.prepare("INSERT INTO scheduled_followups (id, session_id, run_at, instruction) VALUES (?, ?, ?, ?)")
+          .run(id, context.sessionId, runAt, input.instruction);
+        return `Scheduled followup at ${runAt}: "${input.instruction}". Your session will end now and resume at that time.`;
       }
       case "save_memory": {
         const db = getDb();

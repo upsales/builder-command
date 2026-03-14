@@ -123,15 +123,41 @@ async function tick() {
   if (!enabled || processing) return;
 
   try {
-    const todo = getNextEligibleTodo();
-    if (todo) {
-      await processTask(todo);
+    // First, check for any due scheduled followups
+    const followup = getNextDueFollowup();
+    if (followup) {
+      console.log(`[AgentRunner] Resuming scheduled followup for session ${followup.session_id}: "${followup.instruction}"`);
+      const db = getDb();
+      db.prepare("UPDATE scheduled_followups SET status = 'running' WHERE id = ?").run(followup.id);
+      try {
+        await continueSession(followup.session_id, `[Scheduled followup] ${followup.instruction}`);
+        db.prepare("UPDATE scheduled_followups SET status = 'completed' WHERE id = ?").run(followup.id);
+      } catch (e) {
+        console.error("[AgentRunner] Scheduled followup failed:", e);
+        db.prepare("UPDATE scheduled_followups SET status = 'failed' WHERE id = ?").run(followup.id);
+      }
+    } else {
+      // Then check for new tasks
+      const todo = getNextEligibleTodo();
+      if (todo) {
+        await processTask(todo);
+      }
     }
   } catch (e) {
     console.error("[AgentRunner] Error in tick:", e);
   }
 
   scheduleNext();
+}
+
+function getNextDueFollowup(): { id: string; session_id: string; instruction: string } | null {
+  const db = getDb();
+  return db.prepare(
+    `SELECT id, session_id, instruction FROM scheduled_followups
+     WHERE status = 'pending' AND run_at <= datetime('now')
+     ORDER BY run_at ASC
+     LIMIT 1`
+  ).get() as { id: string; session_id: string; instruction: string } | null;
 }
 
 function getNextEligibleTodo(): { id: string; text: string; source?: string; source_id?: string } | null {
@@ -234,6 +260,7 @@ RULES:
 5. Be efficient — minimum tool calls needed
 6. NEVER use the complete_todo tool. The user will review your work and decide when to mark it done.
 7. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you accomplished, what remains, and suggest what to do in the next follow-up.
+8. For tasks that require WAITING (CI checks, deployments, external responses), use schedule_followup to pause and resume later instead of wasting turns polling. Example: after triggering a merge, schedule a 10m followup to verify it succeeded.
 
 TASK: "${todo.text}"`;
 
@@ -246,6 +273,7 @@ TASK: "${todo.text}"`;
     let currentMessages = [...allMessages];
     let finalText = "";
     let exhaustedRounds = false;
+    let scheduledStop = false;
 
     while (maxRounds > 0) {
       maxRounds--;
@@ -274,7 +302,7 @@ TASK: "${todo.text}"`;
           hasToolUse = true;
           console.log(`[AgentRunner] Tool call: ${block.name}`);
 
-          const result = await executeTool(block.name, block.input as Record<string, unknown>);
+          const result = await executeTool(block.name, block.input as Record<string, unknown>, { sessionId });
 
           toolCallsLog.push({
             tool: block.name,
@@ -288,10 +316,15 @@ TASK: "${todo.text}"`;
             tool_use_id: block.id,
             content: result,
           });
+
+          // If agent scheduled a followup, stop the loop after processing remaining tool results
+          if (block.name === "schedule_followup") {
+            scheduledStop = true;
+          }
         }
       }
 
-      if (!hasToolUse || response.stop_reason !== "tool_use") {
+      if (!hasToolUse || response.stop_reason !== "tool_use" || scheduledStop) {
         // Save final assistant response to messages
         currentMessages = [
           ...currentMessages,
@@ -337,8 +370,8 @@ TASK: "${todo.text}"`;
     // Extract summary from final text
     const summary = extractSummary(finalText);
 
-    // If agent ran out of rounds, mark as incomplete (not truly "completed")
-    const finalStatus = exhaustedRounds ? "incomplete" : "completed";
+    // Determine final status
+    const finalStatus = scheduledStop ? "waiting" : exhaustedRounds ? "incomplete" : "completed";
 
     db.prepare(
       `UPDATE agent_sessions SET
@@ -428,6 +461,7 @@ RULES:
 6. Be efficient — minimum tool calls needed
 7. NEVER use the complete_todo tool
 8. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you accomplished, what remains, and suggest what to do in the next follow-up.
+9. For tasks that require WAITING, use schedule_followup to pause and resume later.
 
 ORIGINAL TASK: "${taskText}"`;
 
@@ -438,6 +472,7 @@ ORIGINAL TASK: "${taskText}"`;
     ];
     let finalText = "";
     let exhaustedRounds = false;
+    let scheduledStop = false;
 
     while (maxRounds > 0) {
       maxRounds--;
@@ -460,7 +495,7 @@ ORIGINAL TASK: "${taskText}"`;
       for (const block of response.content) {
         if (block.type === "tool_use") {
           hasToolUse = true;
-          const result = await executeTool(block.name, block.input as Record<string, unknown>);
+          const result = await executeTool(block.name, block.input as Record<string, unknown>, { sessionId });
           toolCallsLog.push({
             tool: block.name,
             input: block.input,
@@ -468,10 +503,14 @@ ORIGINAL TASK: "${taskText}"`;
             timestamp: new Date().toISOString(),
           });
           toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
+
+          if (block.name === "schedule_followup") {
+            scheduledStop = true;
+          }
         }
       }
 
-      if (!hasToolUse || response.stop_reason !== "tool_use") {
+      if (!hasToolUse || response.stop_reason !== "tool_use" || scheduledStop) {
         currentMessages.push({ role: "assistant" as const, content: response.content });
         break;
       }
@@ -498,7 +537,7 @@ ORIGINAL TASK: "${taskText}"`;
     }
 
     const summary = extractSummary(finalText);
-    const finalStatus = exhaustedRounds ? "incomplete" : "completed";
+    const finalStatus = scheduledStop ? "waiting" : exhaustedRounds ? "incomplete" : "completed";
     db.prepare(
       `UPDATE agent_sessions SET status = ?, summary = ?, tool_calls = ?, messages = ?, completed_at = datetime('now') WHERE id = ?`
     ).run(finalStatus, summary || (exhaustedRounds ? "Agent ran out of rounds. You can continue the session." : null), JSON.stringify(toolCallsLog), JSON.stringify(currentMessages), sessionId);
@@ -546,5 +585,13 @@ function recoverStaleSessions() {
 
   if (stale.changes > 0) {
     console.log(`[AgentRunner] Recovered ${stale.changes} stale session(s) as incomplete`);
+  }
+
+  // Reset any 'running' scheduled followups back to pending (they were interrupted)
+  const staleFollowups = db.prepare(
+    "UPDATE scheduled_followups SET status = 'pending' WHERE status = 'running'"
+  ).run();
+  if (staleFollowups.changes > 0) {
+    console.log(`[AgentRunner] Reset ${staleFollowups.changes} stale followup(s) to pending`);
   }
 }
