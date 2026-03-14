@@ -224,7 +224,7 @@ async function processTask(todo: { id: string; text: string; source?: string; so
 ## AGENT MODE
 You are an autonomous AI agent. You've been assigned a specific task to complete.
 ${sourceContext}
-TURN BUDGET: You have a maximum of ${totalBudget} turns. Each tool call response counts as one turn. Plan accordingly — if the task is complex, prioritize the most impactful actions first.
+TURN BUDGET: You have a maximum of ${totalBudget} turns. Each tool call response counts as one turn. Plan accordingly — if the task is complex, prioritize the most impactful actions first. If the task is too large for your budget, do as much meaningful work as possible and leave clear notes — the user can send a follow-up to continue where you left off with your full conversation history preserved.
 
 RULES:
 1. Write a 1-sentence PLAN, then execute using tools
@@ -233,7 +233,7 @@ RULES:
 4. If you CANNOT complete the task, state WHY in one sentence
 5. Be efficient — minimum tool calls needed
 6. NEVER use the complete_todo tool. The user will review your work and decide when to mark it done.
-7. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you did and what remains.
+7. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you accomplished, what remains, and suggest what to do in the next follow-up.
 
 TASK: "${todo.text}"`;
 
@@ -417,7 +417,7 @@ export async function continueSession(sessionId: string, followUpText: string): 
 ## AGENT MODE (Follow-up)
 You are an autonomous AI agent continuing work on a task. The user has sent a follow-up message.
 
-TURN BUDGET: You have a maximum of ${totalBudget} turns for this follow-up. Plan accordingly.
+TURN BUDGET: You have a maximum of ${totalBudget} turns for this follow-up. Plan accordingly. If there's still more to do, leave clear notes — the user can send another follow-up to continue.
 
 RULES:
 1. Consider the previous conversation context
@@ -427,7 +427,7 @@ RULES:
 5. If you CANNOT complete the request, state WHY in one sentence
 6. Be efficient — minimum tool calls needed
 7. NEVER use the complete_todo tool
-8. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you did and what remains.
+8. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you accomplished, what remains, and suggest what to do in the next follow-up.
 
 ORIGINAL TASK: "${taskText}"`;
 
