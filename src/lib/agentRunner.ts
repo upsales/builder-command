@@ -230,7 +230,7 @@ TASK: "${todo.text}"`;
     allMessages.push(userMessage);
 
     let currentMessages = [...allMessages];
-    let maxRounds = 15;
+    let maxRounds = 30;
     let finalText = "";
     let exhaustedRounds = false;
 
@@ -410,7 +410,7 @@ ORIGINAL TASK: "${taskText}"`;
       { role: "user", content: followUpText },
     ];
 
-    let maxRounds = 15;
+    let maxRounds = 30;
     let finalText = "";
     let exhaustedRounds = false;
 

@@ -7,9 +7,9 @@ import { notifyChange } from "@/lib/changeNotifier";
 import { sendReply, addReaction } from "@/lib/integrations/slack";
 import { searchRepo, readRepoFile, listRepoFiles, ensureRepo } from "@/lib/repo-cache";
 import { browse, click, type as browserType, screenshot } from "@/lib/browser";
-import { readFileSync, readdirSync, statSync } from "fs";
-import { join } from "path";
-import { execSync } from "child_process";
+import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { join, resolve, relative } from "path";
+import { execSync, execFile } from "child_process";
 
 const SELF_REPO_PATH = process.cwd();
 
@@ -263,7 +263,99 @@ Actions:
       required: ["action"],
     },
   },
+  {
+    name: "execute_code",
+    description: `Execute code in a sandboxed subprocess and return stdout/stderr. Use this as a general-purpose problem-solving tool — data processing, calculations, text parsing, API prototyping, or anything the other tools don't cover.
+
+Supported languages: javascript (Node.js), python (Python 3).
+- 30-second timeout, 1MB output limit
+- Code runs in a temporary workspace (data/workspace/)
+- Can read/write files in that workspace
+- Has access to Node.js/Python standard libraries`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        language: { type: "string", enum: ["javascript", "python"], description: "Language to execute" },
+        code: { type: "string", description: "Code to execute" },
+      },
+      required: ["language", "code"],
+    },
+  },
+  {
+    name: "write_file",
+    description: "Write content to a file in the agent workspace (data/workspace/). Use this to save outputs, create scripts, generate reports, etc.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        path: { type: "string", description: "File path relative to workspace (e.g. 'output.json', 'scripts/analyze.py')" },
+        content: { type: "string", description: "File content to write" },
+      },
+      required: ["path", "content"],
+    },
+  },
+  {
+    name: "edit_file",
+    description: "Find and replace text in a file in the agent workspace (data/workspace/). Use for targeted edits to existing files.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        path: { type: "string", description: "File path relative to workspace" },
+        find: { type: "string", description: "Text to find (exact match)" },
+        replace: { type: "string", description: "Text to replace with" },
+      },
+      required: ["path", "find", "replace"],
+    },
+  },
 ];
+
+const WORKSPACE_DIR = join(process.cwd(), "data", "workspace");
+
+function ensureWorkspace(): string {
+  if (!existsSync(WORKSPACE_DIR)) {
+    mkdirSync(WORKSPACE_DIR, { recursive: true });
+  }
+  return WORKSPACE_DIR;
+}
+
+function safeWorkspacePath(filePath: string): string {
+  const workspace = ensureWorkspace();
+  const resolved = resolve(workspace, filePath);
+  // Prevent path traversal outside workspace
+  if (!resolved.startsWith(workspace)) {
+    throw new Error("Path traversal not allowed — must stay within data/workspace/");
+  }
+  return resolved;
+}
+
+function executeCodeSandboxed(language: string, code: string): Promise<string> {
+  return new Promise((res) => {
+    const workspace = ensureWorkspace();
+    const cmd = language === "python" ? "python3" : "node";
+    const args = language === "python" ? ["-c", code] : ["-e", code];
+
+    execFile(cmd, args, {
+      cwd: workspace,
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024, // 1MB
+      env: { ...process.env, NODE_PATH: "", PYTHONDONTWRITEBYTECODE: "1" },
+    }, (error: Error & { killed?: boolean } | null, stdout: string, stderr: string) => {
+      let output = "";
+      if (stdout) output += stdout;
+      if (stderr) output += (output ? "\n--- stderr ---\n" : "") + stderr;
+      if (error && !stdout && !stderr) {
+        output = `Error: ${error.message}`;
+      }
+      if (error && "killed" in error && error.killed) {
+        output += "\n[Process killed — exceeded 30s timeout]";
+      }
+      const maxLen = 50_000;
+      if (output.length > maxLen) {
+        output = output.slice(0, maxLen) + `\n... [truncated, ${output.length} chars total]`;
+      }
+      res(output || "(no output)");
+    });
+  });
+}
 
 // Execute a tool call and return the result
 export async function executeTool(name: string, input: Record<string, unknown>): Promise<string> {
@@ -475,6 +567,28 @@ export async function executeTool(name: string, input: Record<string, unknown>):
             return `Unknown browse action: ${action}`;
         }
       }
+      case "execute_code": {
+        const language = input.language as string;
+        const code = input.code as string;
+        return await executeCodeSandboxed(language, code);
+      }
+      case "write_file": {
+        const filePath = safeWorkspacePath(input.path as string);
+        const dir = filePath.substring(0, filePath.lastIndexOf("/"));
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        writeFileSync(filePath, input.content as string, "utf-8");
+        return `Wrote ${(input.content as string).length} bytes to workspace/${input.path}`;
+      }
+      case "edit_file": {
+        const filePath = safeWorkspacePath(input.path as string);
+        if (!existsSync(filePath)) return `Error: File not found — workspace/${input.path}`;
+        const content = readFileSync(filePath, "utf-8");
+        const find = input.find as string;
+        if (!content.includes(find)) return `Error: Text not found in file`;
+        const updated = content.replace(find, input.replace as string);
+        writeFileSync(filePath, updated, "utf-8");
+        return `Edited workspace/${input.path} — replaced ${find.length} chars`;
+      }
       default:
         return `Unknown tool: ${name}`;
     }
@@ -559,7 +673,7 @@ export function buildSystemPrompt(codeContext?: { repo: string; prNumber?: numbe
   let systemPrompt = `You are a powerful work assistant embedded in "Builder Command". You can see all the user's work items AND take actions on their behalf using tools. Be proactive — if the user asks you to do something, DO it with tools rather than just describing how.
 
 ## Your Capabilities
-You can: dismiss/snooze items, merge PRs, enable auto-merge, request reviewers, change Linear status, assign Linear issues, reply in Slack, react to Slack messages, create/complete todos, search/read code from GitHub repos, browse the web (fetch any URL), browse websites with a real browser via browse_web (renders JavaScript, takes screenshots — use this for SPAs and dashboards), and call Linear and GitHub APIs directly with auto-auth via api_fetch (use this to look up issue details, PR reviews, comments, etc.).
+You can: dismiss/snooze items, merge PRs, enable auto-merge, request reviewers, change Linear status, assign Linear issues, reply in Slack, react to Slack messages, create/complete todos, search/read code from GitHub repos, browse the web (fetch any URL), browse websites with a real browser via browse_web (renders JavaScript, takes screenshots — use this for SPAs and dashboards), call Linear and GitHub APIs directly with auto-auth via api_fetch, **execute arbitrary code** (JavaScript or Python) via execute_code for data processing/calculations/parsing/anything the other tools don't cover, and **write/edit files** in a workspace directory (data/workspace/) to save outputs, scripts, or reports.
 
 ## Current Work Items
 
