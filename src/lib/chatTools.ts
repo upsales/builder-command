@@ -1,15 +1,15 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { getItems, getProfile, dismissItem, snoozeItem, upsertItem } from "@/lib/items";
-import { getDb } from "@/lib/db";
+import { getDb, getSetting } from "@/lib/db";
 import { mergePR, enableAutoMerge, addReviewer } from "@/lib/integrations/github";
 import { updateIssueState, updateIssueAssignee, fetchSingleIssue } from "@/lib/integrations/linear";
 import { notifyChange } from "@/lib/changeNotifier";
 import { sendReply, addReaction } from "@/lib/integrations/slack";
 import { searchRepo, readRepoFile, listRepoFiles, ensureRepo } from "@/lib/repo-cache";
 import { browse, click, type as browserType, screenshot } from "@/lib/browser";
-import { readFileSync, readdirSync, statSync } from "fs";
-import { join } from "path";
-import { execSync } from "child_process";
+import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { join, resolve, relative } from "path";
+import { execSync, execFile } from "child_process";
 
 const SELF_REPO_PATH = process.cwd();
 
@@ -263,10 +263,142 @@ Actions:
       required: ["action"],
     },
   },
+  {
+    name: "save_memory",
+    description: `Save a fact, preference, or learning to persistent memory. Memories survive across sessions and are always visible to the agent. Use this proactively when you learn something useful about the user, their team, their workflows, repos, or preferences.
+
+Good memories: "User prefers Slack replies to be casual and short", "design-system repo requires 2 approvals", "John is the frontend lead", "Weekly standup is Monday 10am".
+Bad memories: Temporary facts, things already in the work items context.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        content: { type: "string", description: "The fact or preference to remember" },
+        category: { type: "string", enum: ["user", "team", "workflow", "repo", "general"], description: "Category for organization" },
+      },
+      required: ["content"],
+    },
+  },
+  {
+    name: "delete_memory",
+    description: "Delete a memory that is no longer accurate or relevant.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        memory_id: { type: "string", description: "ID of the memory to delete" },
+      },
+      required: ["memory_id"],
+    },
+  },
+  {
+    name: "schedule_followup",
+    description: `Schedule yourself to wake up later and continue working. Use this for tasks that require waiting — e.g., "check if CI passed in 10 minutes", "verify deployment in 30 minutes", "follow up on Slack thread in 1 hour". Your full conversation history is preserved when you wake up.
+
+When you call this tool, your current session ends. You'll be resumed at the scheduled time with the instruction you provide as context.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        delay: { type: "string", enum: ["5m", "10m", "15m", "30m", "1h", "2h", "4h"], description: "How long to wait before waking up" },
+        instruction: { type: "string", description: "What to do when you wake up — be specific so your future self knows exactly what to check" },
+      },
+      required: ["delay", "instruction"],
+    },
+  },
+  {
+    name: "execute_code",
+    description: `Execute code in a sandboxed subprocess and return stdout/stderr. Use this as a general-purpose problem-solving tool — data processing, calculations, text parsing, API prototyping, or anything the other tools don't cover.
+
+Supported languages: javascript (Node.js), python (Python 3).
+- 30-second timeout, 1MB output limit
+- Code runs in a temporary workspace (data/workspace/)
+- Can read/write files in that workspace
+- Has access to Node.js/Python standard libraries`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        language: { type: "string", enum: ["javascript", "python"], description: "Language to execute" },
+        code: { type: "string", description: "Code to execute" },
+      },
+      required: ["language", "code"],
+    },
+  },
+  {
+    name: "write_file",
+    description: "Write content to a file in the agent workspace (data/workspace/). Use this to save outputs, create scripts, generate reports, etc.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        path: { type: "string", description: "File path relative to workspace (e.g. 'output.json', 'scripts/analyze.py')" },
+        content: { type: "string", description: "File content to write" },
+      },
+      required: ["path", "content"],
+    },
+  },
+  {
+    name: "edit_file",
+    description: "Find and replace text in a file in the agent workspace (data/workspace/). Use for targeted edits to existing files.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        path: { type: "string", description: "File path relative to workspace" },
+        find: { type: "string", description: "Text to find (exact match)" },
+        replace: { type: "string", description: "Text to replace with" },
+      },
+      required: ["path", "find", "replace"],
+    },
+  },
 ];
 
+const WORKSPACE_DIR = join(process.cwd(), "data", "workspace");
+
+function ensureWorkspace(): string {
+  if (!existsSync(WORKSPACE_DIR)) {
+    mkdirSync(WORKSPACE_DIR, { recursive: true });
+  }
+  return WORKSPACE_DIR;
+}
+
+function safeWorkspacePath(filePath: string): string {
+  const workspace = ensureWorkspace();
+  const resolved = resolve(workspace, filePath);
+  // Prevent path traversal outside workspace
+  if (!resolved.startsWith(workspace)) {
+    throw new Error("Path traversal not allowed — must stay within data/workspace/");
+  }
+  return resolved;
+}
+
+function executeCodeSandboxed(language: string, code: string): Promise<string> {
+  return new Promise((res) => {
+    const workspace = ensureWorkspace();
+    const cmd = language === "python" ? "python3" : "node";
+    const args = language === "python" ? ["-c", code] : ["-e", code];
+
+    execFile(cmd, args, {
+      cwd: workspace,
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024, // 1MB
+      env: { ...process.env, NODE_PATH: "", PYTHONDONTWRITEBYTECODE: "1" },
+    }, (error: Error & { killed?: boolean } | null, stdout: string, stderr: string) => {
+      let output = "";
+      if (stdout) output += stdout;
+      if (stderr) output += (output ? "\n--- stderr ---\n" : "") + stderr;
+      if (error && !stdout && !stderr) {
+        output = `Error: ${error.message}`;
+      }
+      if (error && "killed" in error && error.killed) {
+        output += "\n[Process killed — exceeded 30s timeout]";
+      }
+      const maxLen = 50_000;
+      if (output.length > maxLen) {
+        output = output.slice(0, maxLen) + `\n... [truncated, ${output.length} chars total]`;
+      }
+      res(output || "(no output)");
+    });
+  });
+}
+
 // Execute a tool call and return the result
-export async function executeTool(name: string, input: Record<string, unknown>): Promise<string> {
+export async function executeTool(name: string, input: Record<string, unknown>, context?: { sessionId?: string }): Promise<string> {
   try {
     switch (name) {
       case "dismiss_item": {
@@ -475,6 +607,54 @@ export async function executeTool(name: string, input: Record<string, unknown>):
             return `Unknown browse action: ${action}`;
         }
       }
+      case "schedule_followup": {
+        if (!context?.sessionId) return "Error: schedule_followup is only available in agent sessions, not chat.";
+        const db = getDb();
+        const id = crypto.randomUUID();
+        const delays: Record<string, number> = {
+          "5m": 5 * 60_000, "10m": 10 * 60_000, "15m": 15 * 60_000,
+          "30m": 30 * 60_000, "1h": 60 * 60_000, "2h": 2 * 60 * 60_000, "4h": 4 * 60 * 60_000,
+        };
+        const ms = delays[input.delay as string] ?? 10 * 60_000;
+        const runAt = new Date(Date.now() + ms).toISOString().replace("T", " ").slice(0, 19);
+        db.prepare("INSERT INTO scheduled_followups (id, session_id, run_at, instruction) VALUES (?, ?, ?, ?)")
+          .run(id, context.sessionId, runAt, input.instruction);
+        return `Scheduled followup at ${runAt}: "${input.instruction}". Your session will end now and resume at that time.`;
+      }
+      case "save_memory": {
+        const db = getDb();
+        const id = crypto.randomUUID();
+        const category = (input.category as string) ?? "general";
+        db.prepare("INSERT INTO agent_memories (id, content, category) VALUES (?, ?, ?)").run(id, input.content, category);
+        return `Saved memory (${category}): "${input.content}"`;
+      }
+      case "delete_memory": {
+        const db = getDb();
+        const result = db.prepare("DELETE FROM agent_memories WHERE id = ?").run(input.memory_id as string);
+        return result.changes > 0 ? `Deleted memory ${input.memory_id}` : `Memory not found: ${input.memory_id}`;
+      }
+      case "execute_code": {
+        const language = input.language as string;
+        const code = input.code as string;
+        return await executeCodeSandboxed(language, code);
+      }
+      case "write_file": {
+        const filePath = safeWorkspacePath(input.path as string);
+        const dir = filePath.substring(0, filePath.lastIndexOf("/"));
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        writeFileSync(filePath, input.content as string, "utf-8");
+        return `Wrote ${(input.content as string).length} bytes to workspace/${input.path}`;
+      }
+      case "edit_file": {
+        const filePath = safeWorkspacePath(input.path as string);
+        if (!existsSync(filePath)) return `Error: File not found — workspace/${input.path}`;
+        const content = readFileSync(filePath, "utf-8");
+        const find = input.find as string;
+        if (!content.includes(find)) return `Error: Text not found in file`;
+        const updated = content.replace(find, input.replace as string);
+        writeFileSync(filePath, updated, "utf-8");
+        return `Edited workspace/${input.path} — replaced ${find.length} chars`;
+      }
       default:
         return `Unknown tool: ${name}`;
     }
@@ -559,7 +739,7 @@ export function buildSystemPrompt(codeContext?: { repo: string; prNumber?: numbe
   let systemPrompt = `You are a powerful work assistant embedded in "Builder Command". You can see all the user's work items AND take actions on their behalf using tools. Be proactive — if the user asks you to do something, DO it with tools rather than just describing how.
 
 ## Your Capabilities
-You can: dismiss/snooze items, merge PRs, enable auto-merge, request reviewers, change Linear status, assign Linear issues, reply in Slack, react to Slack messages, create/complete todos, search/read code from GitHub repos, browse the web (fetch any URL), browse websites with a real browser via browse_web (renders JavaScript, takes screenshots — use this for SPAs and dashboards), and call Linear and GitHub APIs directly with auto-auth via api_fetch (use this to look up issue details, PR reviews, comments, etc.).
+You can: dismiss/snooze items, merge PRs, enable auto-merge, request reviewers, change Linear status, assign Linear issues, reply in Slack, react to Slack messages, create/complete todos, search/read code from GitHub repos, browse the web (fetch any URL), browse websites with a real browser via browse_web (renders JavaScript, takes screenshots — use this for SPAs and dashboards), call Linear and GitHub APIs directly with auto-auth via api_fetch, **execute arbitrary code** (JavaScript or Python) via execute_code for data processing/calculations/parsing/anything the other tools don't cover, and **write/edit files** in a workspace directory (data/workspace/) to save outputs, scripts, or reports.
 
 ## Current Work Items
 
@@ -580,6 +760,23 @@ ${todoContext || "No todos"}
 
 ## Slack Conversation History
 ${conversationContext}
+
+## Agent Memory
+${(() => {
+  const memories = db.prepare("SELECT id, content, category FROM agent_memories ORDER BY category, created_at").all() as { id: string; content: string; category: string }[];
+  if (memories.length === 0) return "No memories saved yet. Use save_memory when you learn something useful about the user, their team, workflows, or preferences.";
+  const byCategory = new Map<string, { id: string; content: string }[]>();
+  for (const m of memories) {
+    if (!byCategory.has(m.category)) byCategory.set(m.category, []);
+    byCategory.get(m.category)!.push(m);
+  }
+  return Array.from(byCategory.entries()).map(([cat, mems]) =>
+    `### ${cat}\n${mems.map(m => `- [${m.id}] ${m.content}`).join("\n")}`
+  ).join("\n");
+})()}
+
+## User Instructions (Claude.me)
+${getSetting("agent_prompt") || "No custom instructions set. The user can configure agent behavior in settings."}
 
 ## Guidelines
 - Profile: GitHub: ${profile?.github_username ?? "not set"}, Linear: ${profile?.linear_email ?? "not set"}

@@ -146,6 +146,31 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at);
   `);
 
+  // Agent memory — persistent facts the agent learns across sessions
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_memories (
+      id TEXT PRIMARY KEY,
+      content TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'general',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_memories_category ON agent_memories(category);
+  `);
+
+  // Scheduled followups — agent can schedule itself to wake up later
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS scheduled_followups (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      run_at TEXT NOT NULL,
+      instruction TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_scheduled_followups_run_at ON scheduled_followups(run_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_followups_status ON scheduled_followups(status);
+  `);
+
   // Add columns to existing tables
   try { db.exec("ALTER TABLE profile ADD COLUMN google_refresh_token TEXT"); } catch { /* already exists */ }
   try { db.exec("ALTER TABLE daily_todos ADD COLUMN deadline TEXT"); } catch { /* already exists */ }
@@ -155,4 +180,5 @@ function migrate(db: Database.Database) {
   try { db.exec("ALTER TABLE daily_todos ADD COLUMN source TEXT"); } catch { /* already exists */ }
   try { db.exec("ALTER TABLE daily_todos ADD COLUMN source_id TEXT"); } catch { /* already exists */ }
   try { db.exec("ALTER TABLE daily_todos ADD COLUMN completed_at TEXT"); } catch { /* already exists */ }
+  try { db.exec("ALTER TABLE daily_todos ADD COLUMN agent_prompt TEXT"); } catch { /* already exists */ }
 }

@@ -1,6 +1,15 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { getDb } from "@/lib/db";
+import { getDb, getSetting } from "@/lib/db";
 import { tools, executeTool, buildSystemPrompt } from "@/lib/chatTools";
+
+function getMaxRounds(): number {
+  const setting = getSetting("agent_max_rounds");
+  if (setting) {
+    const parsed = parseInt(setting, 10);
+    if (!isNaN(parsed) && parsed >= 5 && parsed <= 100) return parsed;
+  }
+  return 30;
+}
 import { notifyChange } from "@/lib/changeNotifier";
 import { randomUUID } from "crypto";
 
@@ -114,9 +123,25 @@ async function tick() {
   if (!enabled || processing) return;
 
   try {
-    const todo = getNextEligibleTodo();
-    if (todo) {
-      await processTask(todo);
+    // First, check for any due scheduled followups
+    const followup = getNextDueFollowup();
+    if (followup) {
+      console.log(`[AgentRunner] Resuming scheduled followup for session ${followup.session_id}: "${followup.instruction}"`);
+      const db = getDb();
+      db.prepare("UPDATE scheduled_followups SET status = 'running' WHERE id = ?").run(followup.id);
+      try {
+        await continueSession(followup.session_id, `[Scheduled followup] ${followup.instruction}`);
+        db.prepare("UPDATE scheduled_followups SET status = 'completed' WHERE id = ?").run(followup.id);
+      } catch (e) {
+        console.error("[AgentRunner] Scheduled followup failed:", e);
+        db.prepare("UPDATE scheduled_followups SET status = 'failed' WHERE id = ?").run(followup.id);
+      }
+    } else {
+      // Then check for new tasks
+      const todo = getNextEligibleTodo();
+      if (todo) {
+        await processTask(todo);
+      }
     }
   } catch (e) {
     console.error("[AgentRunner] Error in tick:", e);
@@ -125,12 +150,22 @@ async function tick() {
   scheduleNext();
 }
 
-function getNextEligibleTodo(): { id: string; text: string; source?: string; source_id?: string } | null {
+function getNextDueFollowup(): { id: string; session_id: string; instruction: string } | null {
+  const db = getDb();
+  return db.prepare(
+    `SELECT id, session_id, instruction FROM scheduled_followups
+     WHERE status = 'pending' AND run_at <= datetime('now')
+     ORDER BY run_at ASC
+     LIMIT 1`
+  ).get() as { id: string; session_id: string; instruction: string } | null;
+}
+
+function getNextEligibleTodo(): { id: string; text: string; source?: string; source_id?: string; agent_prompt?: string } | null {
   const db = getDb();
   // Exclude todos that already have ANY session (running, completed, failed, incomplete)
   // Users must explicitly re-trigger or send a follow-up to retry
   return db.prepare(
-    `SELECT dt.id, dt.text, dt.source, dt.source_id FROM daily_todos dt
+    `SELECT dt.id, dt.text, dt.source, dt.source_id, dt.agent_prompt FROM daily_todos dt
      WHERE dt.done = 0 AND dt.agent_enabled = 1
      AND NOT EXISTS (
        SELECT 1 FROM agent_sessions s
@@ -185,7 +220,7 @@ function getSourceContext(source?: string, sourceId?: string): string {
   return "";
 }
 
-async function processTask(todo: { id: string; text: string; source?: string; source_id?: string }) {
+async function processTask(todo: { id: string; text: string; source?: string; source_id?: string; agent_prompt?: string }) {
   processing = true;
   currentTodoId = todo.id;
   const sessionId = randomUUID();
@@ -208,11 +243,15 @@ async function processTask(todo: { id: string; text: string; source?: string; so
 
   try {
     const basePrompt = buildSystemPrompt();
+    let maxRounds = getMaxRounds();
+    const totalBudget = maxRounds;
     const agentPrompt = `${basePrompt}
 
 ## AGENT MODE
 You are an autonomous AI agent. You've been assigned a specific task to complete.
 ${sourceContext}
+TURN BUDGET: You have a maximum of ${totalBudget} turns. Each tool call response counts as one turn. Plan accordingly — if the task is complex, prioritize the most impactful actions first. If the task is too large for your budget, do as much meaningful work as possible and leave clear notes — the user can send a follow-up to continue where you left off with your full conversation history preserved.
+
 RULES:
 1. Write a 1-sentence PLAN, then execute using tools
 2. Be CONCISE and DENSE — no filler, no fluff, no verbose explanations
@@ -220,8 +259,10 @@ RULES:
 4. If you CANNOT complete the task, state WHY in one sentence
 5. Be efficient — minimum tool calls needed
 6. NEVER use the complete_todo tool. The user will review your work and decide when to mark it done.
+7. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you accomplished, what remains, and suggest what to do in the next follow-up.
+8. For tasks that require WAITING (CI checks, deployments, external responses), use schedule_followup to pause and resume later instead of wasting turns polling. Example: after triggering a merge, schedule a 10m followup to verify it succeeded.
 
-TASK: "${todo.text}"`;
+TASK: "${todo.text}"${todo.agent_prompt ? `\n\nTASK-SPECIFIC INSTRUCTIONS FROM USER:\n${todo.agent_prompt}` : ""}`;
 
     const userMessage: Anthropic.MessageParam = {
       role: "user",
@@ -230,9 +271,9 @@ TASK: "${todo.text}"`;
     allMessages.push(userMessage);
 
     let currentMessages = [...allMessages];
-    let maxRounds = 15;
     let finalText = "";
     let exhaustedRounds = false;
+    let scheduledStop = false;
 
     while (maxRounds > 0) {
       maxRounds--;
@@ -261,7 +302,7 @@ TASK: "${todo.text}"`;
           hasToolUse = true;
           console.log(`[AgentRunner] Tool call: ${block.name}`);
 
-          const result = await executeTool(block.name, block.input as Record<string, unknown>);
+          const result = await executeTool(block.name, block.input as Record<string, unknown>, { sessionId });
 
           toolCallsLog.push({
             tool: block.name,
@@ -275,10 +316,15 @@ TASK: "${todo.text}"`;
             tool_use_id: block.id,
             content: result,
           });
+
+          // If agent scheduled a followup, stop the loop after processing remaining tool results
+          if (block.name === "schedule_followup") {
+            scheduledStop = true;
+          }
         }
       }
 
-      if (!hasToolUse || response.stop_reason !== "tool_use") {
+      if (!hasToolUse || response.stop_reason !== "tool_use" || scheduledStop) {
         // Save final assistant response to messages
         currentMessages = [
           ...currentMessages,
@@ -287,11 +333,20 @@ TASK: "${todo.text}"`;
         break;
       }
 
+      // Inject turn budget warning when running low
+      const turnContent: (Anthropic.ToolResultBlockParam | Anthropic.TextBlockParam)[] = [...toolResults];
+      if (maxRounds <= 3 && maxRounds > 0) {
+        turnContent.push({
+          type: "text",
+          text: `⚠️ TURN BUDGET WARNING: You have ${maxRounds} turn(s) remaining. Wrap up now — write your SUMMARY of what was accomplished and what remains.`,
+        });
+      }
+
       // Continue conversation with tool results
       currentMessages = [
         ...currentMessages,
         { role: "assistant" as const, content: response.content },
-        { role: "user" as const, content: toolResults },
+        { role: "user" as const, content: turnContent },
       ];
 
       // Update session in-progress so the UI can show real-time data
@@ -315,8 +370,8 @@ TASK: "${todo.text}"`;
     // Extract summary from final text
     const summary = extractSummary(finalText);
 
-    // If agent ran out of rounds, mark as incomplete (not truly "completed")
-    const finalStatus = exhaustedRounds ? "incomplete" : "completed";
+    // Determine final status
+    const finalStatus = scheduledStop ? "waiting" : exhaustedRounds ? "incomplete" : "completed";
 
     db.prepare(
       `UPDATE agent_sessions SET
@@ -388,10 +443,14 @@ export async function continueSession(sessionId: string, followUpText: string): 
 
   try {
     const basePrompt = buildSystemPrompt();
+    let maxRounds = getMaxRounds();
+    const totalBudget = maxRounds;
     const agentPrompt = `${basePrompt}
 
 ## AGENT MODE (Follow-up)
 You are an autonomous AI agent continuing work on a task. The user has sent a follow-up message.
+
+TURN BUDGET: You have a maximum of ${totalBudget} turns for this follow-up. Plan accordingly. If there's still more to do, leave clear notes — the user can send another follow-up to continue.
 
 RULES:
 1. Consider the previous conversation context
@@ -401,6 +460,8 @@ RULES:
 5. If you CANNOT complete the request, state WHY in one sentence
 6. Be efficient — minimum tool calls needed
 7. NEVER use the complete_todo tool
+8. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you accomplished, what remains, and suggest what to do in the next follow-up.
+9. For tasks that require WAITING, use schedule_followup to pause and resume later.
 
 ORIGINAL TASK: "${taskText}"`;
 
@@ -409,10 +470,9 @@ ORIGINAL TASK: "${taskText}"`;
       ...previousMessages,
       { role: "user", content: followUpText },
     ];
-
-    let maxRounds = 15;
     let finalText = "";
     let exhaustedRounds = false;
+    let scheduledStop = false;
 
     while (maxRounds > 0) {
       maxRounds--;
@@ -435,7 +495,7 @@ ORIGINAL TASK: "${taskText}"`;
       for (const block of response.content) {
         if (block.type === "tool_use") {
           hasToolUse = true;
-          const result = await executeTool(block.name, block.input as Record<string, unknown>);
+          const result = await executeTool(block.name, block.input as Record<string, unknown>, { sessionId });
           toolCallsLog.push({
             tool: block.name,
             input: block.input,
@@ -443,17 +503,30 @@ ORIGINAL TASK: "${taskText}"`;
             timestamp: new Date().toISOString(),
           });
           toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
+
+          if (block.name === "schedule_followup") {
+            scheduledStop = true;
+          }
         }
       }
 
-      if (!hasToolUse || response.stop_reason !== "tool_use") {
+      if (!hasToolUse || response.stop_reason !== "tool_use" || scheduledStop) {
         currentMessages.push({ role: "assistant" as const, content: response.content });
         break;
       }
 
+      // Inject turn budget warning when running low
+      const turnContent: (Anthropic.ToolResultBlockParam | Anthropic.TextBlockParam)[] = [...toolResults];
+      if (maxRounds <= 3 && maxRounds > 0) {
+        turnContent.push({
+          type: "text",
+          text: `⚠️ TURN BUDGET WARNING: You have ${maxRounds} turn(s) remaining. Wrap up now — write your SUMMARY of what was accomplished and what remains.`,
+        });
+      }
+
       currentMessages.push(
         { role: "assistant" as const, content: response.content },
-        { role: "user" as const, content: toolResults },
+        { role: "user" as const, content: turnContent },
       );
 
       db.prepare("UPDATE agent_sessions SET tool_calls = ?, messages = ? WHERE id = ?")
@@ -464,7 +537,7 @@ ORIGINAL TASK: "${taskText}"`;
     }
 
     const summary = extractSummary(finalText);
-    const finalStatus = exhaustedRounds ? "incomplete" : "completed";
+    const finalStatus = scheduledStop ? "waiting" : exhaustedRounds ? "incomplete" : "completed";
     db.prepare(
       `UPDATE agent_sessions SET status = ?, summary = ?, tool_calls = ?, messages = ?, completed_at = datetime('now') WHERE id = ?`
     ).run(finalStatus, summary || (exhaustedRounds ? "Agent ran out of rounds. You can continue the session." : null), JSON.stringify(toolCallsLog), JSON.stringify(currentMessages), sessionId);
@@ -512,5 +585,13 @@ function recoverStaleSessions() {
 
   if (stale.changes > 0) {
     console.log(`[AgentRunner] Recovered ${stale.changes} stale session(s) as incomplete`);
+  }
+
+  // Reset any 'running' scheduled followups back to pending (they were interrupted)
+  const staleFollowups = db.prepare(
+    "UPDATE scheduled_followups SET status = 'pending' WHERE status = 'running'"
+  ).run();
+  if (staleFollowups.changes > 0) {
+    console.log(`[AgentRunner] Reset ${staleFollowups.changes} stale followup(s) to pending`);
   }
 }
