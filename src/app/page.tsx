@@ -2327,22 +2327,35 @@ function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agen
   const [noteText, setNoteText] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [agentPromptModal, setAgentPromptModal] = useState<{ todoId: string; todoText: string } | null>(null);
+  const [agentPromptText, setAgentPromptText] = useState("");
 
   const toggleAgent = async (id: string, enabled: boolean) => {
     if (enabled) {
-      // Use trigger endpoint which sets agent_enabled and starts processing
-      await fetch("/api/agent/trigger", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ todo_id: id }),
-      });
+      // Show modal to optionally add a task-specific prompt
+      const todo = todos.find(t => t.id === id);
+      setAgentPromptText("");
+      setAgentPromptModal({ todoId: id, todoText: todo?.text ?? "" });
     } else {
       await fetch("/api/todos", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, agent_enabled: false }),
       });
+      onRefresh();
     }
+  };
+
+  const submitAgentPrompt = async (skipPrompt?: boolean) => {
+    if (!agentPromptModal) return;
+    const prompt = skipPrompt ? undefined : agentPromptText.trim() || undefined;
+    await fetch("/api/agent/trigger", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ todo_id: agentPromptModal.todoId, agent_prompt: prompt }),
+    });
+    setAgentPromptModal(null);
+    setAgentPromptText("");
     onRefresh();
   };
 
@@ -2650,6 +2663,38 @@ function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agen
               </button>
             )}
           </>)}
+        </div>
+      )}
+
+      {/* Agent prompt modal */}
+      {agentPromptModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setAgentPromptModal(null)}>
+          <div className="bg-card border border-border rounded-lg p-4 w-[440px] max-w-[90vw]" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold mb-1">Run with AI Agent</h3>
+            <p className="text-[11px] text-muted mb-3 truncate">{agentPromptModal.todoText}</p>
+            <textarea
+              autoFocus
+              value={agentPromptText}
+              onChange={(e) => setAgentPromptText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitAgentPrompt(); }
+                if (e.key === "Escape") setAgentPromptModal(null);
+              }}
+              placeholder="Optional: Add specific instructions for this task..."
+              rows={3}
+              className="w-full bg-background border border-border rounded px-3 py-2 text-xs focus:outline-none focus:border-accent resize-y min-h-[60px]"
+            />
+            <div className="flex justify-between items-center mt-3">
+              <span className="text-[10px] text-muted/50">{agentPromptText.trim() ? "\u2318+Enter to run" : "\u2318+Enter or click Run"}</span>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setAgentPromptModal(null)} className="px-3 py-1.5 text-xs text-muted hover:text-foreground transition-colors">Cancel</button>
+                <button onClick={() => submitAgentPrompt()} className="px-3 py-1.5 text-xs bg-purple-600 text-white rounded hover:bg-purple-700 transition-colors flex items-center gap-1.5">
+                  <Bot size={12} />
+                  {agentPromptText.trim() ? "Run with instructions" : "Run"}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

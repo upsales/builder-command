@@ -160,12 +160,12 @@ function getNextDueFollowup(): { id: string; session_id: string; instruction: st
   ).get() as { id: string; session_id: string; instruction: string } | null;
 }
 
-function getNextEligibleTodo(): { id: string; text: string; source?: string; source_id?: string } | null {
+function getNextEligibleTodo(): { id: string; text: string; source?: string; source_id?: string; agent_prompt?: string } | null {
   const db = getDb();
   // Exclude todos that already have ANY session (running, completed, failed, incomplete)
   // Users must explicitly re-trigger or send a follow-up to retry
   return db.prepare(
-    `SELECT dt.id, dt.text, dt.source, dt.source_id FROM daily_todos dt
+    `SELECT dt.id, dt.text, dt.source, dt.source_id, dt.agent_prompt FROM daily_todos dt
      WHERE dt.done = 0 AND dt.agent_enabled = 1
      AND NOT EXISTS (
        SELECT 1 FROM agent_sessions s
@@ -220,7 +220,7 @@ function getSourceContext(source?: string, sourceId?: string): string {
   return "";
 }
 
-async function processTask(todo: { id: string; text: string; source?: string; source_id?: string }) {
+async function processTask(todo: { id: string; text: string; source?: string; source_id?: string; agent_prompt?: string }) {
   processing = true;
   currentTodoId = todo.id;
   const sessionId = randomUUID();
@@ -262,7 +262,7 @@ RULES:
 7. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you accomplished, what remains, and suggest what to do in the next follow-up.
 8. For tasks that require WAITING (CI checks, deployments, external responses), use schedule_followup to pause and resume later instead of wasting turns polling. Example: after triggering a merge, schedule a 10m followup to verify it succeeded.
 
-TASK: "${todo.text}"`;
+TASK: "${todo.text}"${todo.agent_prompt ? `\n\nTASK-SPECIFIC INSTRUCTIONS FROM USER:\n${todo.agent_prompt}` : ""}`;
 
     const userMessage: Anthropic.MessageParam = {
       role: "user",
