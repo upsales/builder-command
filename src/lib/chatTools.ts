@@ -264,6 +264,32 @@ Actions:
     },
   },
   {
+    name: "save_memory",
+    description: `Save a fact, preference, or learning to persistent memory. Memories survive across sessions and are always visible to the agent. Use this proactively when you learn something useful about the user, their team, their workflows, repos, or preferences.
+
+Good memories: "User prefers Slack replies to be casual and short", "design-system repo requires 2 approvals", "John is the frontend lead", "Weekly standup is Monday 10am".
+Bad memories: Temporary facts, things already in the work items context.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        content: { type: "string", description: "The fact or preference to remember" },
+        category: { type: "string", enum: ["user", "team", "workflow", "repo", "general"], description: "Category for organization" },
+      },
+      required: ["content"],
+    },
+  },
+  {
+    name: "delete_memory",
+    description: "Delete a memory that is no longer accurate or relevant.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        memory_id: { type: "string", description: "ID of the memory to delete" },
+      },
+      required: ["memory_id"],
+    },
+  },
+  {
     name: "execute_code",
     description: `Execute code in a sandboxed subprocess and return stdout/stderr. Use this as a general-purpose problem-solving tool — data processing, calculations, text parsing, API prototyping, or anything the other tools don't cover.
 
@@ -567,6 +593,18 @@ export async function executeTool(name: string, input: Record<string, unknown>):
             return `Unknown browse action: ${action}`;
         }
       }
+      case "save_memory": {
+        const db = getDb();
+        const id = crypto.randomUUID();
+        const category = (input.category as string) ?? "general";
+        db.prepare("INSERT INTO agent_memories (id, content, category) VALUES (?, ?, ?)").run(id, input.content, category);
+        return `Saved memory (${category}): "${input.content}"`;
+      }
+      case "delete_memory": {
+        const db = getDb();
+        const result = db.prepare("DELETE FROM agent_memories WHERE id = ?").run(input.memory_id as string);
+        return result.changes > 0 ? `Deleted memory ${input.memory_id}` : `Memory not found: ${input.memory_id}`;
+      }
       case "execute_code": {
         const language = input.language as string;
         const code = input.code as string;
@@ -694,6 +732,20 @@ ${todoContext || "No todos"}
 
 ## Slack Conversation History
 ${conversationContext}
+
+## Agent Memory
+${(() => {
+  const memories = db.prepare("SELECT id, content, category FROM agent_memories ORDER BY category, created_at").all() as { id: string; content: string; category: string }[];
+  if (memories.length === 0) return "No memories saved yet. Use save_memory when you learn something useful about the user, their team, workflows, or preferences.";
+  const byCategory = new Map<string, { id: string; content: string }[]>();
+  for (const m of memories) {
+    if (!byCategory.has(m.category)) byCategory.set(m.category, []);
+    byCategory.get(m.category)!.push(m);
+  }
+  return Array.from(byCategory.entries()).map(([cat, mems]) =>
+    `### ${cat}\n${mems.map(m => `- [${m.id}] ${m.content}`).join("\n")}`
+  ).join("\n");
+})()}
 
 ## User Instructions (Claude.me)
 ${getSetting("agent_prompt") || "No custom instructions set. The user can configure agent behavior in settings."}
