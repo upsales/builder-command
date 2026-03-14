@@ -217,11 +217,15 @@ async function processTask(todo: { id: string; text: string; source?: string; so
 
   try {
     const basePrompt = buildSystemPrompt();
+    let maxRounds = getMaxRounds();
+    const totalBudget = maxRounds;
     const agentPrompt = `${basePrompt}
 
 ## AGENT MODE
 You are an autonomous AI agent. You've been assigned a specific task to complete.
 ${sourceContext}
+TURN BUDGET: You have a maximum of ${totalBudget} turns. Each tool call response counts as one turn. Plan accordingly — if the task is complex, prioritize the most impactful actions first.
+
 RULES:
 1. Write a 1-sentence PLAN, then execute using tools
 2. Be CONCISE and DENSE — no filler, no fluff, no verbose explanations
@@ -229,6 +233,7 @@ RULES:
 4. If you CANNOT complete the task, state WHY in one sentence
 5. Be efficient — minimum tool calls needed
 6. NEVER use the complete_todo tool. The user will review your work and decide when to mark it done.
+7. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you did and what remains.
 
 TASK: "${todo.text}"`;
 
@@ -239,7 +244,6 @@ TASK: "${todo.text}"`;
     allMessages.push(userMessage);
 
     let currentMessages = [...allMessages];
-    let maxRounds = getMaxRounds();
     let finalText = "";
     let exhaustedRounds = false;
 
@@ -296,11 +300,20 @@ TASK: "${todo.text}"`;
         break;
       }
 
+      // Inject turn budget warning when running low
+      const turnContent: (Anthropic.ToolResultBlockParam | Anthropic.TextBlockParam)[] = [...toolResults];
+      if (maxRounds <= 3 && maxRounds > 0) {
+        turnContent.push({
+          type: "text",
+          text: `⚠️ TURN BUDGET WARNING: You have ${maxRounds} turn(s) remaining. Wrap up now — write your SUMMARY of what was accomplished and what remains.`,
+        });
+      }
+
       // Continue conversation with tool results
       currentMessages = [
         ...currentMessages,
         { role: "assistant" as const, content: response.content },
-        { role: "user" as const, content: toolResults },
+        { role: "user" as const, content: turnContent },
       ];
 
       // Update session in-progress so the UI can show real-time data
@@ -397,10 +410,14 @@ export async function continueSession(sessionId: string, followUpText: string): 
 
   try {
     const basePrompt = buildSystemPrompt();
+    let maxRounds = getMaxRounds();
+    const totalBudget = maxRounds;
     const agentPrompt = `${basePrompt}
 
 ## AGENT MODE (Follow-up)
 You are an autonomous AI agent continuing work on a task. The user has sent a follow-up message.
+
+TURN BUDGET: You have a maximum of ${totalBudget} turns for this follow-up. Plan accordingly.
 
 RULES:
 1. Consider the previous conversation context
@@ -410,6 +427,7 @@ RULES:
 5. If you CANNOT complete the request, state WHY in one sentence
 6. Be efficient — minimum tool calls needed
 7. NEVER use the complete_todo tool
+8. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you did and what remains.
 
 ORIGINAL TASK: "${taskText}"`;
 
@@ -418,8 +436,6 @@ ORIGINAL TASK: "${taskText}"`;
       ...previousMessages,
       { role: "user", content: followUpText },
     ];
-
-    let maxRounds = getMaxRounds();
     let finalText = "";
     let exhaustedRounds = false;
 
@@ -460,9 +476,18 @@ ORIGINAL TASK: "${taskText}"`;
         break;
       }
 
+      // Inject turn budget warning when running low
+      const turnContent: (Anthropic.ToolResultBlockParam | Anthropic.TextBlockParam)[] = [...toolResults];
+      if (maxRounds <= 3 && maxRounds > 0) {
+        turnContent.push({
+          type: "text",
+          text: `⚠️ TURN BUDGET WARNING: You have ${maxRounds} turn(s) remaining. Wrap up now — write your SUMMARY of what was accomplished and what remains.`,
+        });
+      }
+
       currentMessages.push(
         { role: "assistant" as const, content: response.content },
-        { role: "user" as const, content: toolResults },
+        { role: "user" as const, content: turnContent },
       );
 
       db.prepare("UPDATE agent_sessions SET tool_calls = ?, messages = ? WHERE id = ?")
