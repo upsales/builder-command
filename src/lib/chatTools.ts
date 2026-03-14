@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { getItems, getProfile, dismissItem, snoozeItem, upsertItem } from "@/lib/items";
-import { getDb } from "@/lib/db";
+import { getDb, getSetting } from "@/lib/db";
 import { mergePR, enableAutoMerge, addReviewer } from "@/lib/integrations/github";
 import { updateIssueState, updateIssueAssignee, fetchSingleIssue } from "@/lib/integrations/linear";
 import { notifyChange } from "@/lib/changeNotifier";
@@ -694,6 +694,9 @@ ${todoContext || "No todos"}
 
 ## Slack Conversation History
 ${conversationContext}
+
+## User Instructions (Claude.me)
+${getSetting("agent_prompt") || "No custom instructions set. The user can configure agent behavior in settings."}
 
 ## Guidelines
 - Profile: GitHub: ${profile?.github_username ?? "not set"}, Linear: ${profile?.linear_email ?? "not set"}

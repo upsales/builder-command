@@ -1,6 +1,15 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { getDb } from "@/lib/db";
+import { getDb, getSetting } from "@/lib/db";
 import { tools, executeTool, buildSystemPrompt } from "@/lib/chatTools";
+
+function getMaxRounds(): number {
+  const setting = getSetting("agent_max_rounds");
+  if (setting) {
+    const parsed = parseInt(setting, 10);
+    if (!isNaN(parsed) && parsed >= 5 && parsed <= 100) return parsed;
+  }
+  return 30;
+}
 import { notifyChange } from "@/lib/changeNotifier";
 import { randomUUID } from "crypto";
 
@@ -230,7 +239,7 @@ TASK: "${todo.text}"`;
     allMessages.push(userMessage);
 
     let currentMessages = [...allMessages];
-    let maxRounds = 30;
+    let maxRounds = getMaxRounds();
     let finalText = "";
     let exhaustedRounds = false;
 
@@ -410,7 +419,7 @@ ORIGINAL TASK: "${taskText}"`;
       { role: "user", content: followUpText },
     ];
 
-    let maxRounds = 30;
+    let maxRounds = getMaxRounds();
     let finalText = "";
     let exhaustedRounds = false;
 
