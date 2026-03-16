@@ -9,7 +9,7 @@ export async function GET(request: NextRequest) {
   // Single session with full messages (for chat view)
   if (sessionId) {
     const session = db.prepare(
-      `SELECT s.*, t.source as todo_source, t.source_id as todo_source_id, t.text as todo_text
+      `SELECT s.*, t.source as todo_source, t.source_id as todo_source_id, t.text as todo_text, t.agent_prompt
        FROM agent_sessions s
        LEFT JOIN daily_todos t ON s.todo_id = t.id
        WHERE s.id = ?`

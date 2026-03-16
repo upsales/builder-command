@@ -410,7 +410,7 @@ export interface ChatPanelHandle {
 const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
   const [chatTab, setChatTab] = useState<"chat" | "agent">("chat");
   const [agentSessionId, setAgentSessionId] = useState<string | null>(null);
-  const [agentSessionData, setAgentSessionData] = useState<{ id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; messages?: string; tool_calls?: string; started_at?: string; completed_at?: string; todoText?: string; todo_source?: string; todo_source_id?: string; source_url?: string; source_identifier?: string } | null>(null);
+  const [agentSessionData, setAgentSessionData] = useState<{ id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; messages?: string; tool_calls?: string; started_at?: string; completed_at?: string; todoText?: string; todo_source?: string; todo_source_id?: string; source_url?: string; source_identifier?: string; agent_prompt?: string } | null>(null);
   const [agentSessions, setAgentSessions] = useState<{ id: string; todo_id: string; status: string; summary?: string; todo_text?: string; started_at?: string; completed_at?: string }[]>([]);
   const [loadingAgentSession, setLoadingAgentSession] = useState(false);
 
@@ -960,6 +960,14 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                     for (const n of names) map.set(n, (map.get(n) ?? 0) + 1);
                     return Array.from(map, ([name, count]) => ({ name, count }));
                   };
+
+                  // Inject custom prompt after first user message if present
+                  if (agentSessionData.agent_prompt && chatBubbles.length > 0) {
+                    const firstUserIdx = chatBubbles.findIndex(b => b.role === "user");
+                    if (firstUserIdx >= 0) {
+                      chatBubbles.splice(firstUserIdx + 1, 0, { role: "user", text: `**Custom instructions:** ${agentSessionData.agent_prompt}` });
+                    }
+                  }
 
                   let lastDay = "";
                   return (
