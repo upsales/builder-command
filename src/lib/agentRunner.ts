@@ -281,7 +281,7 @@ TASK: "${todo.text}"${todo.agent_prompt ? `\n\nTASK-SPECIFIC INSTRUCTIONS FROM U
       const response = await client.messages.create({
         model: "claude-sonnet-4-20250514",
         max_tokens: 4096,
-        system: agentPrompt,
+        system: [{ type: "text", text: agentPrompt, cache_control: { type: "ephemeral" } }],
         tools,
         messages: currentMessages,
       });
@@ -480,7 +480,7 @@ ORIGINAL TASK: "${taskText}"${todo?.agent_prompt ? `\n\nTASK-SPECIFIC INSTRUCTIO
       const response = await client.messages.create({
         model: "claude-sonnet-4-20250514",
         max_tokens: 4096,
-        system: agentPrompt,
+        system: [{ type: "text", text: agentPrompt, cache_control: { type: "ephemeral" } }],
         tools,
         messages: currentMessages,
       });
