@@ -2373,7 +2373,7 @@ function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agen
   const [noteText, setNoteText] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
-  const [agentPromptModal, setAgentPromptModal] = useState<{ todoId: string; todoText: string } | null>(null);
+  const [agentPromptModal, setAgentPromptModal] = useState<{ todoId: string; todoText: string; source?: string; sourceId?: string } | null>(null);
   const [agentPromptText, setAgentPromptText] = useState("");
 
   const toggleAgent = async (id: string, enabled: boolean) => {
@@ -2381,7 +2381,7 @@ function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agen
       // Show modal to optionally add a task-specific prompt
       const todo = todos.find(t => t.id === id);
       setAgentPromptText("");
-      setAgentPromptModal({ todoId: id, todoText: todo?.text ?? "" });
+      setAgentPromptModal({ todoId: id, todoText: todo?.text ?? "", source: todo?.source ?? undefined, sourceId: todo?.source_id ?? undefined });
     } else {
       await fetch("/api/todos", {
         method: "PATCH",
@@ -2403,6 +2403,27 @@ function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agen
     setAgentPromptModal(null);
     setAgentPromptText("");
     onRefresh();
+  };
+
+  const startClanker = async () => {
+    if (!agentPromptModal) return;
+    const extra = agentPromptText.trim();
+    const prompt = extra ? `${extra}\n\n${agentPromptModal.todoText}` : agentPromptModal.todoText;
+    const res = await fetch("/api/clanker", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt,
+        source: agentPromptModal.source,
+        sourceId: agentPromptModal.sourceId,
+      }),
+    });
+    const data = await res.json();
+    setAgentPromptModal(null);
+    setAgentPromptText("");
+    if (data?.id) {
+      window.open(`${window.location.protocol}//${window.location.hostname}:3001/sessions/${data.id}`, "_blank");
+    }
   };
 
   const handleDragStart = (id: string) => setDragId(id);
@@ -2734,6 +2755,10 @@ function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agen
               <span className="text-[10px] text-muted/50">{agentPromptText.trim() ? "\u2318+Enter to run" : "\u2318+Enter or click Run"}</span>
               <div className="flex gap-2">
                 <button type="button" onClick={() => setAgentPromptModal(null)} className="px-3 py-1.5 text-xs text-muted hover:text-foreground transition-colors">Cancel</button>
+                <button onClick={() => startClanker()} className="px-3 py-1.5 text-xs bg-orange-600 text-white rounded hover:bg-orange-700 transition-colors flex items-center gap-1.5">
+                  <Zap size={12} />
+                  Clanker
+                </button>
                 <button onClick={() => submitAgentPrompt()} className="px-3 py-1.5 text-xs bg-purple-600 text-white rounded hover:bg-purple-700 transition-colors flex items-center gap-1.5">
                   <Bot size={12} />
                   {agentPromptText.trim() ? "Run with instructions" : "Run"}
