@@ -31,9 +31,18 @@ export async function GET(request: NextRequest) {
   }
 
   if (todoId) {
+    const ids = todoId.split(",").filter(Boolean);
+    if (ids.length === 1) {
+      const sessions = db.prepare(
+        "SELECT id, todo_id, status, summary, failure_reason, tool_calls, started_at, completed_at, created_at FROM agent_sessions WHERE todo_id = ? ORDER BY created_at DESC"
+      ).all(ids[0]);
+      return NextResponse.json(sessions);
+    }
+    // Batch: return latest session per todo_id
+    const placeholders = ids.map(() => "?").join(",");
     const sessions = db.prepare(
-      "SELECT id, todo_id, status, summary, failure_reason, tool_calls, started_at, completed_at, created_at FROM agent_sessions WHERE todo_id = ? ORDER BY created_at DESC"
-    ).all(todoId);
+      `SELECT id, todo_id, status, summary, failure_reason, tool_calls, started_at, completed_at, created_at FROM agent_sessions WHERE todo_id IN (${placeholders}) ORDER BY created_at DESC`
+    ).all(...ids);
     return NextResponse.json(sessions);
   }
 

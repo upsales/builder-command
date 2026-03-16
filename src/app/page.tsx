@@ -1215,12 +1215,11 @@ export default function Home() {
       // Fetch agent sessions for agent-enabled todos
       const agentTodoIds = todos.filter((t: { agent_enabled?: number }) => t.agent_enabled).map((t: { id: string }) => t.id);
       if (agentTodoIds.length > 0) {
-        Promise.all(agentTodoIds.map((id: string) =>
-          fetch(`/api/agent/sessions?todo_id=${id}`).then(r => r.json())
-        )).then((results) => {
+        fetch(`/api/agent/sessions?todo_id=${agentTodoIds.join(",")}`).then(r => r.json()).then((sessions: { id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string }[]) => {
           const sessionsMap: Record<string, { id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string }> = {};
-          for (const sessions of results) {
-            if (sessions.length > 0) sessionsMap[sessions[0].todo_id] = sessions[0];
+          for (const s of sessions) {
+            // Keep the latest session per todo (results are ordered by created_at DESC)
+            if (!sessionsMap[s.todo_id]) sessionsMap[s.todo_id] = s;
           }
           setAgentSessions(sessionsMap);
         }).catch(() => {});
@@ -1230,9 +1229,6 @@ export default function Home() {
 
   useEffect(() => {
     refreshTodos();
-    // Poll todos every 5 seconds to catch external changes (e.g. CLI updates)
-    const todoPoll = setInterval(refreshTodos, 5000);
-    return () => clearInterval(todoPoll);
   }, [refreshTodos]);
 
   // Global keyboard shortcuts
@@ -1431,11 +1427,12 @@ export default function Home() {
           const itemsRes = await fetch("/api/items");
           const newItems = await itemsRes.json();
           setItems(newItems);
+          refreshTodos();
         }
       } catch { /* ignore */ }
     }, 2000);
     return () => clearInterval(poll);
-  }, [profile]);
+  }, [profile, refreshTodos]);
 
   // Background clone repos from GitHub PRs and poll status
   useEffect(() => {
@@ -1806,6 +1803,57 @@ function QuickRepliesSettings() {
   );
 }
 
+function LocalReposSettings() {
+  const [found, setFound] = useState<{ repo: string; localPath: string }[]>([]);
+  const [saved, setSaved] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+  const [scanned, setScanned] = useState(false);
+
+  const load = () => {
+    setLoading(true);
+    fetch("/api/settings/local-repos").then(r => r.json()).then(d => {
+      setFound(d.found ?? []);
+      setSaved(d.saved ?? {});
+      setScanned(true);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const toggle = async (repo: string, localPath: string) => {
+    const updated = { ...saved };
+    if (updated[repo]) {
+      delete updated[repo];
+    } else {
+      updated[repo] = localPath;
+    }
+    setSaved(updated);
+    await fetch("/api/settings/local-repos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repos: updated }) });
+  };
+
+  return (
+    <div>
+      <h3 className="text-[10px] uppercase tracking-wider text-muted/60 mb-1.5">Local Repositories</h3>
+      <p className="text-[10px] text-muted/40 mb-2">Git repos found on disk. Enabled repos give the AI agent direct read access instead of cloning.</p>
+      {loading && <p className="text-[10px] text-muted/40">Scanning...</p>}
+      {scanned && found.length === 0 && <p className="text-[10px] text-muted/40">No GitHub repos found in home directory.</p>}
+      {found.length > 0 && (
+        <div className="space-y-0.5 max-h-[200px] overflow-y-auto">
+          {found.map(({ repo, localPath }) => (
+            <label key={repo} className="flex items-center gap-2 py-0.5 cursor-pointer group/lr hover:bg-background/50 rounded px-1 -mx-1">
+              <input type="checkbox" checked={!!saved[repo]} onChange={() => toggle(repo, localPath)} className="accent-accent" />
+              <span className="text-[11px] flex-1 truncate">{repo}</span>
+              <span className="text-[9px] text-muted/30 truncate max-w-[150px] group-hover/lr:text-muted/50">{localPath.replace(/^\/Users\/[^/]+/, "~")}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      {scanned && <button onClick={load} className="text-[10px] text-accent hover:underline mt-1">Rescan</button>}
+    </div>
+  );
+}
+
 function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<"general" | "actions">("general");
   const [settings, setSettings] = useState<{ env: Record<string, { set: boolean; preview: string }>; webhooks: Record<string, string> } | null>(null);
@@ -1911,6 +1959,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                 </div>
               </div>
             ))}
+
+            {/* Local Repos */}
+            <LocalReposSettings />
 
             {/* Quick Replies */}
             <QuickRepliesSettings />

@@ -2,10 +2,62 @@ import { exec, execSync } from "child_process";
 import { promisify } from "util";
 import path from "path";
 import fs from "fs";
+import os from "os";
+import { getSetting, setSetting } from "./db";
 
 const execAsync = promisify(exec);
 
 const REPOS_DIR = path.join(process.cwd(), "data", "repos");
+
+// --- Local repo discovery ---
+
+/** Scan home directory (1 level deep) for git repos with GitHub remotes. */
+export function scanLocalRepos(): { repo: string; localPath: string }[] {
+  const home = os.homedir();
+  const results: { repo: string; localPath: string }[] = [];
+  try {
+    const entries = fs.readdirSync(home, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      const dir = path.join(home, entry.name);
+      const gitDir = path.join(dir, ".git");
+      if (!fs.existsSync(gitDir)) continue;
+      // Skip worktrees (they have a .git file, not a .git directory)
+      if (!fs.statSync(gitDir).isDirectory()) continue;
+      try {
+        const remote = execSync("git remote get-url origin", {
+          cwd: dir, timeout: 3000, encoding: "utf-8", stdio: "pipe",
+        }).trim();
+        const match = remote.match(/github\.com[:/](.+?)(?:\.git)?$/);
+        if (match) {
+          results.push({ repo: match[1], localPath: dir });
+        }
+      } catch { /* no origin or not a git repo */ }
+    }
+  } catch { /* can't read home dir */ }
+  return results.sort((a, b) => a.repo.localeCompare(b.repo));
+}
+
+/** Get saved local repo mappings from settings. */
+export function getLocalRepos(): Record<string, string> {
+  const raw = getSetting("local_repos");
+  return raw ? JSON.parse(raw) : {};
+}
+
+/** Save local repo mappings to settings. */
+export function setLocalRepos(repos: Record<string, string>): void {
+  setSetting("local_repos", JSON.stringify(repos));
+}
+
+/** Resolve a repo to its local path (if configured), or null. */
+function resolveLocalRepo(repo: string): string | null {
+  const locals = getLocalRepos();
+  const localPath = locals[repo];
+  if (localPath && fs.existsSync(path.join(localPath, ".git"))) {
+    return localPath;
+  }
+  return null;
+}
 
 function ensureReposDir() {
   if (!fs.existsSync(REPOS_DIR)) {
@@ -23,10 +75,10 @@ const readyRepos = new Set<string>();
 
 /** Check if a repo is cloned and ready. */
 export function isRepoReady(repo: string): boolean {
+  if (resolveLocalRepo(repo)) return true;
   if (readyRepos.has(repo)) return true;
   const localPath = repoLocalPath(repo);
   if (fs.existsSync(path.join(localPath, ".git"))) {
-    // Verify it has actual commits (not a broken clone)
     try {
       const head = fs.readFileSync(path.join(localPath, ".git", "HEAD"), "utf-8").trim();
       if (head) {
@@ -45,6 +97,8 @@ export function isRepoCloning(repo: string): boolean {
 
 /** Get the local path for a repo (only if ready). */
 export function getRepoPath(repo: string): string | null {
+  const local = resolveLocalRepo(repo);
+  if (local) return local;
   if (!isRepoReady(repo)) return null;
   return repoLocalPath(repo);
 }
@@ -52,6 +106,8 @@ export function getRepoPath(repo: string): string | null {
 /** Get status of all tracked repos. */
 export function getRepoStatuses(): Record<string, "ready" | "cloning" | "unknown"> {
   const statuses: Record<string, "ready" | "cloning" | "unknown"> = {};
+  const locals = getLocalRepos();
+  for (const repo of Object.keys(locals)) statuses[repo] = "ready";
   for (const repo of readyRepos) statuses[repo] = "ready";
   for (const repo of cloningRepos) statuses[repo] = "cloning";
   return statuses;
@@ -95,7 +151,7 @@ export function cloneRepoBackground(repo: string): void {
 
 /** Fetch a PR branch (async). */
 export async function fetchPRBranch(repo: string, prNumber: number): Promise<void> {
-  const localPath = repoLocalPath(repo);
+  const localPath = resolveLocalRepo(repo) ?? repoLocalPath(repo);
   if (!fs.existsSync(path.join(localPath, ".git"))) return;
   try {
     await execAsync(`git fetch origin pull/${prNumber}/head:pr-${prNumber} --force`, {
@@ -109,6 +165,8 @@ export async function fetchPRBranch(repo: string, prNumber: number): Promise<voi
 
 /** Sync clone/update a repo. Returns the local path. Used by chat tools. */
 export function ensureRepo(repo: string): string {
+  const local = resolveLocalRepo(repo);
+  if (local) return local;
   ensureReposDir();
   const localPath = repoLocalPath(repo);
   if (fs.existsSync(path.join(localPath, ".git"))) {
@@ -128,7 +186,7 @@ export function ensureRepo(repo: string): string {
 
 /** Search for a pattern in a cloned repo. */
 export function searchRepo(repo: string, query: string, branch?: string): string {
-  const localPath = repoLocalPath(repo);
+  const localPath = resolveLocalRepo(repo) ?? repoLocalPath(repo);
   if (!fs.existsSync(path.join(localPath, ".git"))) return "(repo not cloned yet)";
   const ref = branch ?? "HEAD";
   try {
@@ -146,7 +204,7 @@ export function searchRepo(repo: string, query: string, branch?: string): string
 
 /** Read a specific file from a cloned repo at a given ref. */
 export function readRepoFile(repo: string, filePath: string, branch?: string): string {
-  const localPath = repoLocalPath(repo);
+  const localPath = resolveLocalRepo(repo) ?? repoLocalPath(repo);
   if (!fs.existsSync(path.join(localPath, ".git"))) return "(repo not cloned yet)";
   const ref = branch ?? "HEAD";
   try {
@@ -161,7 +219,7 @@ export function readRepoFile(repo: string, filePath: string, branch?: string): s
 
 /** List files in a cloned repo directory. */
 export function listRepoFiles(repo: string, dir: string, branch?: string): string {
-  const localPath = repoLocalPath(repo);
+  const localPath = resolveLocalRepo(repo) ?? repoLocalPath(repo);
   if (!fs.existsSync(path.join(localPath, ".git"))) return "(repo not cloned yet)";
   const ref = branch ?? "HEAD";
   try {
@@ -176,7 +234,7 @@ export function listRepoFiles(repo: string, dir: string, branch?: string): strin
 
 /** Fetch PR context with diff and file contents. */
 export async function getPRCodeContext(repo: string, prNumber: number) {
-  const localPath = repoLocalPath(repo);
+  const localPath = resolveLocalRepo(repo) ?? repoLocalPath(repo);
   if (!fs.existsSync(path.join(localPath, ".git"))) {
     return { diff: "", files: [], baseBranch: "main", headBranch: `pr-${prNumber}` };
   }
