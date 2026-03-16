@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from "react";
-import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, AlertCircle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, Flame, Zap, Trophy, Plus, Trash2, Square, CheckSquare, Play, Pause, EyeOff, Search, Wrench } from "lucide-react";
+import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, AlertCircle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, Zap, Plus, Trash2, Square, CheckSquare, Play, Pause, EyeOff, Search, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 function useLocalStorage<T>(key: string, defaultValue: T): [T, (v: T | ((prev: T) => T)) => void] {
@@ -1120,9 +1120,19 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
   );
 });
 
-interface XpData {
-  total: number; today: number; level: number; xpInLevel: number; xpForNextLevel: number; streak: number;
-  todayActions: { action: string; source: string | null; xp: number; label: string | null; created_at: string }[];
+// ─── Image Lightbox ───────────────────────────────────────────
+function ImageLightbox({ src, alt, onClose }: { src: string; alt?: string; onClose: () => void }) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm cursor-pointer" onClick={onClose}>
+      <button onClick={onClose} className="absolute top-4 right-4 text-white/70 hover:text-white transition-colors z-10"><X size={24} /></button>
+      <img src={src} alt={alt ?? ""} className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl" onClick={(e) => e.stopPropagation()} />
+    </div>
+  );
 }
 
 // ─── Main App ─────────────────────────────────────────────────
@@ -1147,11 +1157,8 @@ export default function Home() {
   const [chatWidth, setChatWidth] = useLocalStorage("ui:chatWidth", 520);
   const [githubMode, setGithubMode] = useLocalStorage<"author" | "assignee">("filter:githubMode", "author");
 
-  // XP / gamification
-  const [xpData, setXpData] = useState<XpData | null>(null);
-  const refreshXp = useCallback(() => {
-    fetch("/api/xp").then((r) => r.json()).then(setXpData).catch(() => {});
-  }, []);
+  // Image lightbox
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
 
   // Chat ref for injecting prompts
   const chatRef = useRef<ChatPanelHandle>(null);
@@ -1208,12 +1215,11 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    refreshXp();
     refreshTodos();
     // Poll todos every 5 seconds to catch external changes (e.g. CLI updates)
     const todoPoll = setInterval(refreshTodos, 5000);
     return () => clearInterval(todoPoll);
-  }, [refreshXp, refreshTodos]);
+  }, [refreshTodos]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -1451,9 +1457,9 @@ export default function Home() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source: item.source, source_id: item.source_id }),
-    }).then(() => refreshXp());
+    });
     setItems((prev) => prev.filter((i) => i.id !== item.id));
-  }, [refreshXp]);
+  }, []);
 
   if (!profileLoaded) {
     return (
@@ -1514,30 +1520,6 @@ export default function Home() {
         )}
 
         <div className="flex-1" />
-
-        {/* XP bar — right-aligned */}
-        {xpData && (
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1 text-[11px]">
-              <Trophy size={11} className="text-yellow-400" />
-              <span className="font-bold text-yellow-400">Lv{xpData.level}</span>
-            </div>
-            <div className="w-24 h-1.5 bg-card-hover rounded-full overflow-hidden" title={`${xpData.xpInLevel}/${xpData.xpForNextLevel} XP to next level`}>
-              <div className="h-full bg-gradient-to-r from-yellow-500 to-amber-400 rounded-full transition-all duration-500" style={{ width: `${(xpData.xpInLevel / xpData.xpForNextLevel) * 100}%` }} />
-            </div>
-            <span className="text-[10px] text-muted/60">{xpData.xpInLevel}/{xpData.xpForNextLevel}</span>
-            {xpData.today > 0 && (
-              <span className="text-[10px] text-emerald-400 flex items-center gap-0.5">
-                <Zap size={9} /> +{xpData.today} today
-              </span>
-            )}
-            {xpData.streak > 1 && (
-              <span className="text-[10px] text-orange-400 flex items-center gap-0.5">
-                <Flame size={9} /> {xpData.streak}d
-              </span>
-            )}
-          </div>
-        )}
 
         {/* Actions */}
         <div className="flex items-center gap-1.5">
@@ -1608,12 +1590,15 @@ export default function Home() {
                 <p className="text-sm">Hit Sync to pull from your integrations</p>
               </div>
             ) : (
-              <ItemList items={items} setItems={setItems} onDismiss={onDismiss} dailyTodos={dailyTodos} xpData={xpData} onRefreshTodos={refreshTodos} onRefreshXp={refreshXp} onChatAbout={handleChatAbout} repoStatuses={repoStatuses} slackUserId={profile?.slack_user_id ?? undefined} agentSessions={agentSessions} onOpenAgentSession={(sessionId) => { setChatCollapsed(false); chatRef.current?.openAgentSession(sessionId); }} />
+              <ItemList items={items} setItems={setItems} onDismiss={onDismiss} dailyTodos={dailyTodos} onRefreshTodos={refreshTodos} onChatAbout={handleChatAbout} repoStatuses={repoStatuses} slackUserId={profile?.slack_user_id ?? undefined} agentSessions={agentSessions} onOpenAgentSession={(sessionId) => { setChatCollapsed(false); setTimeout(() => chatRef.current?.openAgentSession(sessionId), 50); }} onImageClick={setLightboxSrc} />
             )}
           </div>
         </div>
 
       </div>
+
+      {/* ─── Image Lightbox ─── */}
+      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
 
       {/* ─── Modals ─── */}
       {showSlackConnect && (
@@ -2254,13 +2239,14 @@ function buildAutoTodos(items: TodoItem[]): AutoTodo[] {
   return autoTodos;
 }
 
-function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agentSessions, onOpenAgentSession }: {
+function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agentSessions, onOpenAgentSession, onImageClick }: {
   todos: { id: string; text: string; done: number; date: string | null; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number; source?: string | null; source_id?: string | null; completed_at?: string | null }[];
   onRefresh: () => void;
   focusedTodoIds?: string[];
   onToggleFocusTodo?: (id: string) => void;
   agentSessions?: Record<string, { id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string }>;
   onOpenAgentSession?: (sessionId: string) => void;
+  onImageClick?: (src: string) => void;
 }) {
   const [newTodo, setNewTodo] = useState("");
   const [noDate, setNoDate] = useState(false);
@@ -2554,7 +2540,7 @@ function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agen
           {todo.image && (
             <div className="ml-5 mt-0.5 mb-1 flex gap-1 flex-wrap">
               {(todo.image.startsWith("[") ? JSON.parse(todo.image) as string[] : [todo.image]).map((img, idx) => (
-                <img key={idx} src={img} alt="" className="h-16 rounded border border-border/50 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => window.open(img, "_blank")} />
+                <img key={idx} src={img} alt="" className="h-16 rounded border border-border/50 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => onImageClick?.(img)} />
               ))}
             </div>
           )}
@@ -2701,19 +2687,18 @@ function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agen
   );
 }
 
-function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTodos, onRefreshXp, onChatAbout, repoStatuses, slackUserId, agentSessions, onOpenAgentSession }: {
+function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onChatAbout, repoStatuses, slackUserId, agentSessions, onOpenAgentSession, onImageClick }: {
   items: TodoItem[];
   setItems: React.Dispatch<React.SetStateAction<TodoItem[]>>;
   onDismiss: (item: TodoItem) => void;
   dailyTodos: { id: string; text: string; done: number; date: string; deadline?: string | null; image?: string | null; note?: string | null; agent_enabled?: number; source?: string | null; source_id?: string | null; completed_at?: string | null }[];
-  xpData: XpData | null;
   onRefreshTodos: () => void;
-  onRefreshXp: () => void;
   onChatAbout: (prompt: string, prInfo?: { repo: string; prNumber: number }) => void;
   repoStatuses: Record<string, string>;
   slackUserId?: string;
   agentSessions: Record<string, { id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string }>;
   onOpenAgentSession?: (sessionId: string) => void;
+  onImageClick?: (src: string) => void;
 }) {
   const [hideDrafts, setHideDrafts] = useLocalStorage("filter:hideDrafts", true);
   const [hiddenStatesArr, setHiddenStatesArr] = useLocalStorage<string[]>("filter:hiddenStates", ["Done", "Canceled", "Cancelled"]);
@@ -3140,7 +3125,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                         <CalendarCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} isInProgress onToggleInProgress={() => toggleFocus(item)} />
                       )}
                       {item.source === "slack" && (
-                        <SlackMessage item={item} onDismiss={onDismiss} />
+                        <SlackMessage item={item} onDismiss={onDismiss} onImageClick={onImageClick} />
                       )}
                       {/* Agent tasks linked to this item */}
                       {itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(todo => {
@@ -3152,7 +3137,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                         return (
                           <div key={todo.id} className="mx-3 mb-2 border-t border-sky-500/20 pt-2">
                             <div className="flex items-center gap-2">
-                              <button onClick={async () => { await fetch("/api/todos", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: todo.id, done: true }) }); onRefreshTodos(); onRefreshXp(); }} className="shrink-0 text-muted/40 hover:text-green-400 transition-colors" title="Mark as done"><Square size={12} /></button>
+                              <button onClick={async () => { await fetch("/api/todos", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: todo.id, done: true }) }); onRefreshTodos(); }} className="shrink-0 text-muted/40 hover:text-green-400 transition-colors" title="Mark as done"><Square size={12} /></button>
                               <span className="flex-1 text-[11px] truncate">{todo.text}</span>
                               {isRunning ? <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Loader2 size={9} className="animate-spin" /> Running</span>
                                 : isFailed ? <span className="text-[9px] text-red-400 flex items-center gap-0.5"><XCircle size={9} /> Failed</span>
@@ -3193,7 +3178,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                     return (
                       <div key={todo.id} onClick={() => toggleRef.current?.()} className={`border rounded-lg p-2.5 cursor-pointer hover:brightness-110 transition-all ${isRunning ? "bg-purple-500/5 border-purple-500/20" : isFailed ? "bg-red-500/5 border-red-500/20" : isIncomplete ? "bg-amber-500/5 border-amber-500/20" : "bg-green-500/5 border-green-500/20"}`}>
                         <div className="flex items-center gap-2">
-                          <button onClick={(e) => { e.stopPropagation(); (async () => { await fetch("/api/todos", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: todo.id, done: true }) }); onRefreshTodos(); onRefreshXp(); })(); }} className="shrink-0 text-muted/40 hover:text-green-400 transition-colors" title="Mark as done"><Square size={14} /></button>
+                          <button onClick={(e) => { e.stopPropagation(); (async () => { await fetch("/api/todos", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: todo.id, done: true }) }); onRefreshTodos(); })(); }} className="shrink-0 text-muted/40 hover:text-green-400 transition-colors" title="Mark as done"><Square size={14} /></button>
                           <span className="flex-1 text-xs font-medium truncate">{todo.text}</span>
                           {parentItem && (
                             <button onClick={(e) => { e.stopPropagation(); scrollToSourceItem(parentItem.source, parentItem.source_id); }} className={`text-[9px] shrink-0 flex items-center gap-0.5 hover:underline ${todo.source === "linear" ? "text-violet-400/60 hover:text-violet-400" : "text-orange-400/60 hover:text-orange-400"}`}>
@@ -3225,7 +3210,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
               <span>My Tasks</span>
             </button>
             {!myTasksCollapsed && <div className="bg-card border border-border rounded-lg px-3 py-2">
-              <TodoSection todos={searchedTodos.filter(t => !agentSessions[t.id])} onRefresh={() => { onRefreshTodos(); onRefreshXp(); }} focusedTodoIds={focusedTodoIds} onToggleFocusTodo={toggleFocusTodo} agentSessions={agentSessions} onOpenAgentSession={onOpenAgentSession} />
+              <TodoSection todos={searchedTodos.filter(t => !agentSessions[t.id])} onRefresh={() => { onRefreshTodos(); }} focusedTodoIds={focusedTodoIds} onToggleFocusTodo={toggleFocusTodo} agentSessions={agentSessions} onOpenAgentSession={onOpenAgentSession} onImageClick={onImageClick} />
             </div>}
           </div>
 
@@ -3265,6 +3250,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, xpData, onRefreshTod
                           onDismissChannel={dismissAll}
                           isContext={isDm && lastOtherIdx >= 0 && idx < lastOtherIdx}
                           showNewDivider={firstUnreadIdx > 0 && idx === firstUnreadIdx}
+                          onImageClick={onImageClick}
                         />
                       ));
                     })()}
@@ -4938,8 +4924,8 @@ function formatTime(ts: string) {
   return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${time}`;
 }
 
-function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, showNewDivider }: {
-  item: TodoItem; onDismiss: (item: TodoItem) => void; isLast?: boolean; onDismissChannel?: () => void; isContext?: boolean; showNewDivider?: boolean;
+function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, showNewDivider, onImageClick }: {
+  item: TodoItem; onDismiss: (item: TodoItem) => void; isLast?: boolean; onDismissChannel?: () => void; isContext?: boolean; showNewDivider?: boolean; onImageClick?: (src: string) => void;
 }) {
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   const [showThread, setShowThread] = useState(false);
@@ -5154,13 +5140,13 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
                 const fullProxyUrl = `/api/slack/image?url=${encodeURIComponent(f.url)}`;
                 if (f.mimetype?.startsWith("image/")) {
                   return (
-                    <a key={idx} href={fullProxyUrl} target="_blank" rel="noopener noreferrer" className="block">
-                      <img
-                        src={proxyUrl}
-                        alt={f.name}
-                        className="max-w-[400px] max-h-[300px] rounded border border-border/50 hover:border-accent/50 transition-colors"
-                      />
-                    </a>
+                    <img
+                      key={idx}
+                      src={proxyUrl}
+                      alt={f.name}
+                      className="max-w-[400px] max-h-[300px] rounded border border-border/50 hover:border-accent/50 transition-colors cursor-pointer"
+                      onClick={() => onImageClick?.(fullProxyUrl)}
+                    />
                   );
                 }
                 return (

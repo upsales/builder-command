@@ -403,10 +403,7 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
     switch (name) {
       case "dismiss_item": {
         dismissItem(input.source as string, input.source_id as string);
-        const db = getDb();
-        const xp = { slack: 5, github: 15, linear: 10, calendar: 5 }[input.source as string] ?? 5;
-        db.prepare("INSERT INTO xp_log (action, source, xp, label) VALUES (?, ?, ?, ?)").run("dismiss", input.source, xp, `Cleared ${input.source} item`);
-        return `Dismissed ${input.source} item ${input.source_id}. +${xp} XP`;
+        return `Dismissed ${input.source} item ${input.source_id}`;
       }
       case "snooze_item": {
         const now = new Date();
@@ -423,8 +420,6 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
       case "merge_pr": {
         const result = await mergePR(input.repo as string, input.pr_number as number);
         if (result.success) {
-          const db = getDb();
-          db.prepare("INSERT INTO xp_log (action, source, xp, label) VALUES (?, ?, ?, ?)").run("merge_pr", "github", 50, `Merged PR #${input.pr_number}`);
           // Dismiss both possible source_id formats (review- and pr-) since the PR is now merged
           const repo = input.repo as string;
           const prNum = input.pr_number as number;
@@ -432,7 +427,7 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
           dismissItem("github", `review-${repo}-${prNum}`);
           notifyChange();
         }
-        return result.success ? `PR #${input.pr_number} merged! +50 XP` : `Failed: ${result.message}`;
+        return result.success ? `PR #${input.pr_number} merged!` : `Failed: ${result.message}`;
       }
       case "enable_auto_merge": {
         const result = await enableAutoMerge(input.repo as string, input.pr_number as number);
@@ -464,9 +459,7 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
         const profile = getProfile();
         if (!profile?.slack_token) return "Error: Slack not connected";
         await sendReply(profile.slack_token, input.channel as string, input.text as string, input.thread_ts as string);
-        const db = getDb();
-        db.prepare("INSERT INTO xp_log (action, source, xp, label) VALUES (?, ?, ?, ?)").run("reply_slack", "slack", 10, "Replied in Slack");
-        return `Sent Slack reply. +10 XP`;
+        return `Sent Slack reply.`;
       }
       case "react_slack": {
         const profile = getProfile();
@@ -484,8 +477,7 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
       case "complete_todo": {
         const db = getDb();
         db.prepare("UPDATE daily_todos SET done = 1, completed_at = ? WHERE id = ?").run(new Date().toISOString(), input.todo_id);
-        db.prepare("INSERT INTO xp_log (action, source, xp, label) VALUES (?, ?, ?, ?)").run("complete_todo", "todo", 20, "Completed todo");
-        return `Marked todo as done. +20 XP`;
+        return `Marked todo as done.`;
       }
       case "search_code": {
         if (input.repo === "self") {
