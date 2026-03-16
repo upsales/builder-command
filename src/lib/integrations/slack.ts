@@ -2,8 +2,6 @@ import { WebClient } from "@slack/web-api";
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// Mutex to prevent concurrent full syncs from competing for rate limits
-let fullSyncInProgress = false;
 
 export interface SlackReply {
   sender: string;
@@ -379,9 +377,7 @@ function resolveMessageNames(messages: SlackMessage[]): void {
 //   2. Mentions — search "<@userId>", filter to non-DM channels
 //   3. Thread mentions — already caught by phase 2 (threads show in search)
 //   4. Subscribed threads — search "from:me has:thread" → conversations.replies
-//   5. All channels — users.conversations → conversations.info → fetch unread
-
-export type SyncPhase = 1 | 2 | 3 | 4 | 5;
+export type SyncPhase = 1 | 2 | 3 | 4;
 
 /** Fetch messages for a batch of channels, resolve names, return them.
  *  Batches history calls in groups of 8 to avoid rate limits. */
@@ -421,17 +417,7 @@ export async function fetchChannelMessages(
   phases?: SyncPhase[],
 ): Promise<SlackMessage[]> {
   const client = new WebClient(userToken, { retryConfig: { retries: 0 }, rejectRateLimitedCalls: true });
-  const runPhases = new Set(phases ?? [1, 2, 3, 4, 5]);
-
-  // Prevent concurrent full syncs
-  const isFullSync = runPhases.has(5);
-  if (isFullSync) {
-    if (fullSyncInProgress) {
-      console.log("[slack] Full sync already in progress, skipping");
-      return [];
-    }
-    fullSyncInProgress = true;
-  }
+  const runPhases = new Set(phases ?? [1, 2, 3, 4]);
 
   const allMessages: SlackMessage[] = [];
   const seenMsgIds = new Set<string>();
@@ -450,8 +436,7 @@ export async function fetchChannelMessages(
     }
   };
 
-  try {
-    const t0 = Date.now();
+  const t0 = Date.now();
 
     // ── Phase 1: DMs ──
     if (runPhases.has(1)) {
@@ -527,53 +512,6 @@ export async function fetchChannelMessages(
       }
     }
 
-    // ── Phase 5: All joined channels (not DMs — those are Phase 1) ──
-    // users.conversations with public_channel+private_channel returns only
-    // actual channels (~30-40), NOT the 800+ DMs/mpims.
-    if (runPhases.has(5)) {
-      const t5 = Date.now();
-      // Brief pause for rate limit recovery from phases 1-4
-      onProgress?.("phase 5: checking joined channels...");
-      await sleep(5_000);
-      try {
-        let cursor: string | undefined;
-        const candidates: { id: string; name: string }[] = [];
-        do {
-          const res = await client.users.conversations({
-            types: "public_channel,private_channel",
-            exclude_archived: true,
-            limit: 200,
-            cursor,
-          });
-          for (const ch of res.channels ?? []) {
-            if (!ch.id || fetchedChannelIds.has(ch.id)) continue;
-            const name = (ch as Record<string, unknown>).name as string ?? ch.id;
-            candidates.push({ id: ch.id, name });
-          }
-          cursor = res.response_metadata?.next_cursor || undefined;
-        } while (cursor);
-
-        onProgress?.(`phase 5: checking ${candidates.length} channels for unreads`);
-
-        // Use conversations.info to get last_read (batched to respect Tier 3)
-        const channelMap = new Map<string, { name: string; isDm: boolean }>();
-        for (const ch of candidates) channelMap.set(ch.id, { name: ch.name, isDm: false });
-        const unreadChannels = await filterToUnread(client, channelMap);
-
-        onProgress?.(`phase 5: ${unreadChannels.length} channels with unreads`);
-
-        if (unreadChannels.length > 0) {
-          const msgs = await fetchAndResolve(client, unreadChannels);
-          addMessages(msgs);
-          console.log(`[slack] Phase 5: ${msgs.length} msgs from ${unreadChannels.length} unread out of ${candidates.length} channels in ${Date.now() - t5}ms`);
-        } else {
-          console.log(`[slack] Phase 5: 0 unread out of ${candidates.length} channels in ${Date.now() - t5}ms`);
-        }
-      } catch (e) {
-        console.error(`[slack] Phase 5 failed: ${e instanceof Error ? e.message : e}`);
-      }
-    }
-
     // Save user's own messages for style learning
     try {
       const { getDb } = await import("@/lib/db");
@@ -591,9 +529,6 @@ export async function fetchChannelMessages(
     allMessages.sort((a, b) => parseFloat(b.timestamp) - parseFloat(a.timestamp));
     console.log(`[slack] Sync complete: ${allMessages.length} messages, phases [${[...runPhases].join(",")}] in ${Date.now() - t0}ms`);
     return allMessages;
-  } finally {
-    if (isFullSync) fullSyncInProgress = false;
-  }
 }
 
 // ─── Thread unread detection ─────────────────────────────────────────

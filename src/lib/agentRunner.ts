@@ -429,7 +429,7 @@ export async function continueSession(sessionId: string, followUpText: string): 
   }
 
   // Get the task text
-  const todo = db.prepare("SELECT text FROM daily_todos WHERE id = ?").get(session.todo_id) as { text: string } | undefined;
+  const todo = db.prepare("SELECT text, agent_prompt FROM daily_todos WHERE id = ?").get(session.todo_id) as { text: string; agent_prompt: string | null } | undefined;
   const taskText = todo?.text ?? "task";
 
   // Mark session as running again
@@ -463,7 +463,7 @@ RULES:
 8. When you see a "TURN BUDGET WARNING", wrap up immediately — summarize what you accomplished, what remains, and suggest what to do in the next follow-up.
 9. For tasks that require WAITING, use schedule_followup to pause and resume later.
 
-ORIGINAL TASK: "${taskText}"`;
+ORIGINAL TASK: "${taskText}"${todo?.agent_prompt ? `\n\nTASK-SPECIFIC INSTRUCTIONS FROM USER:\n${todo.agent_prompt}` : ""}`;
 
     // Add follow-up as new user message
     const currentMessages: Anthropic.MessageParam[] = [

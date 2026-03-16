@@ -1160,6 +1160,12 @@ export default function Home() {
   // Image lightbox
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
 
+  // Quick replies (loaded from DB settings)
+  const [quickReplies, setQuickReplies] = useState<string[]>(["Kollar på det!"]);
+  useEffect(() => {
+    fetch("/api/settings/quick-replies").then(r => r.json()).then(d => { if (d.replies?.length) setQuickReplies(d.replies); }).catch(() => {});
+  }, []);
+
   // Chat ref for injecting prompts
   const chatRef = useRef<ChatPanelHandle>(null);
   const handleChatAbout = useCallback((prompt: string, prInfo?: { repo: string; prNumber: number }) => {
@@ -1323,9 +1329,9 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           githubMode,
-          // Quick sync: DMs + mentions + all channels (phases 1-2, 5)
-          // Full sync adds threads (phases 3-4)
-          ...(quick ? { slackPhases: [1, 2, 5] } : {}),
+          // Quick sync: DMs + mentions (phases 1-2)
+          // Full sync adds thread mentions + subscribed threads (phases 3-4)
+          ...(quick ? { slackPhases: [1, 2] } : {}),
         }),
       });
       const reader = res.body?.getReader();
@@ -1590,7 +1596,7 @@ export default function Home() {
                 <p className="text-sm">Hit Sync to pull from your integrations</p>
               </div>
             ) : (
-              <ItemList items={items} setItems={setItems} onDismiss={onDismiss} dailyTodos={dailyTodos} onRefreshTodos={refreshTodos} onChatAbout={handleChatAbout} repoStatuses={repoStatuses} slackUserId={profile?.slack_user_id ?? undefined} agentSessions={agentSessions} onOpenAgentSession={(sessionId) => { setChatCollapsed(false); setTimeout(() => chatRef.current?.openAgentSession(sessionId), 50); }} onImageClick={setLightboxSrc} />
+              <ItemList items={items} setItems={setItems} onDismiss={onDismiss} dailyTodos={dailyTodos} onRefreshTodos={refreshTodos} onChatAbout={handleChatAbout} repoStatuses={repoStatuses} slackUserId={profile?.slack_user_id ?? undefined} agentSessions={agentSessions} onOpenAgentSession={(sessionId) => { setChatCollapsed(false); setTimeout(() => chatRef.current?.openAgentSession(sessionId), 50); }} onImageClick={setLightboxSrc} quickReplies={quickReplies} />
             )}
           </div>
         </div>
@@ -1749,6 +1755,49 @@ function ActionForm({ form, setForm, onSave, onCancel }: {
   );
 }
 
+function QuickRepliesSettings() {
+  const [replies, setReplies] = useState<string[]>([]);
+  const [newReply, setNewReply] = useState("");
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/settings/quick-replies").then(r => r.json()).then(d => { setReplies(d.replies ?? []); setLoaded(true); }).catch(() => setLoaded(true));
+  }, []);
+
+  const save = async (updated: string[]) => {
+    setReplies(updated);
+    await fetch("/api/settings/quick-replies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ replies: updated }) });
+  };
+
+  if (!loaded) return null;
+
+  return (
+    <div>
+      <h3 className="text-[10px] uppercase tracking-wider text-muted/60 mb-1.5">Quick Replies</h3>
+      <p className="text-[10px] text-muted/40 mb-2">Random reply picked when using the quick reply button on Slack messages.</p>
+      <div className="space-y-1 mb-2">
+        {replies.map((r, i) => (
+          <div key={i} className="flex items-center gap-2 group/qr">
+            <span className="text-[11px] flex-1 truncate">{r}</span>
+            <button onClick={() => save(replies.filter((_, j) => j !== i))} className="opacity-0 group-hover/qr:opacity-100 text-[10px] text-red-400 hover:text-red-300 transition-opacity">remove</button>
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center gap-1">
+        <input
+          type="text"
+          value={newReply}
+          onChange={(e) => setNewReply(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && newReply.trim()) { save([...replies, newReply.trim()]); setNewReply(""); } }}
+          placeholder="Add a reply..."
+          className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-[11px] focus:outline-none focus:border-accent"
+        />
+        <button onClick={() => { if (newReply.trim()) { save([...replies, newReply.trim()]); setNewReply(""); } }} className="text-[10px] text-accent hover:underline">Add</button>
+      </div>
+    </div>
+  );
+}
+
 function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<"general" | "actions">("general");
   const [settings, setSettings] = useState<{ env: Record<string, { set: boolean; preview: string }>; webhooks: Record<string, string> } | null>(null);
@@ -1854,6 +1903,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                 </div>
               </div>
             ))}
+
+            {/* Quick Replies */}
+            <QuickRepliesSettings />
 
             {/* Webhook URLs */}
             <div>
@@ -2687,7 +2739,7 @@ function TodoSection({ todos, onRefresh, focusedTodoIds, onToggleFocusTodo, agen
   );
 }
 
-function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onChatAbout, repoStatuses, slackUserId, agentSessions, onOpenAgentSession, onImageClick }: {
+function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onChatAbout, repoStatuses, slackUserId, agentSessions, onOpenAgentSession, onImageClick, quickReplies }: {
   items: TodoItem[];
   setItems: React.Dispatch<React.SetStateAction<TodoItem[]>>;
   onDismiss: (item: TodoItem) => void;
@@ -2699,6 +2751,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
   agentSessions: Record<string, { id: string; todo_id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string }>;
   onOpenAgentSession?: (sessionId: string) => void;
   onImageClick?: (src: string) => void;
+  quickReplies?: string[];
 }) {
   const [hideDrafts, setHideDrafts] = useLocalStorage("filter:hideDrafts", true);
   const [hiddenStatesArr, setHiddenStatesArr] = useLocalStorage<string[]>("filter:hiddenStates", ["Done", "Canceled", "Cancelled"]);
@@ -3125,7 +3178,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                         <CalendarCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} isInProgress onToggleInProgress={() => toggleFocus(item)} />
                       )}
                       {item.source === "slack" && (
-                        <SlackMessage item={item} onDismiss={onDismiss} onImageClick={onImageClick} />
+                        <SlackMessage item={item} onDismiss={onDismiss} onImageClick={onImageClick} quickReplies={quickReplies} />
                       )}
                       {/* Agent tasks linked to this item */}
                       {itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(todo => {
@@ -3210,7 +3263,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
               <span>My Tasks</span>
             </button>
             {!myTasksCollapsed && <div className="bg-card border border-border rounded-lg px-3 py-2">
-              <TodoSection todos={searchedTodos.filter(t => !agentSessions[t.id])} onRefresh={() => { onRefreshTodos(); }} focusedTodoIds={focusedTodoIds} onToggleFocusTodo={toggleFocusTodo} agentSessions={agentSessions} onOpenAgentSession={onOpenAgentSession} onImageClick={onImageClick} />
+              <TodoSection todos={searchedTodos.filter(t => !agentSessions[t.id] || t.done)} onRefresh={() => { onRefreshTodos(); }} focusedTodoIds={focusedTodoIds} onToggleFocusTodo={toggleFocusTodo} agentSessions={agentSessions} onOpenAgentSession={onOpenAgentSession} onImageClick={onImageClick} />
             </div>}
           </div>
 
@@ -3251,6 +3304,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                           isContext={isDm && lastOtherIdx >= 0 && idx < lastOtherIdx}
                           showNewDivider={firstUnreadIdx > 0 && idx === firstUnreadIdx}
                           onImageClick={onImageClick}
+                          quickReplies={quickReplies}
                         />
                       ));
                     })()}
@@ -4924,8 +4978,8 @@ function formatTime(ts: string) {
   return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${time}`;
 }
 
-function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, showNewDivider, onImageClick }: {
-  item: TodoItem; onDismiss: (item: TodoItem) => void; isLast?: boolean; onDismissChannel?: () => void; isContext?: boolean; showNewDivider?: boolean; onImageClick?: (src: string) => void;
+function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, showNewDivider, onImageClick, quickReplies }: {
+  item: TodoItem; onDismiss: (item: TodoItem) => void; isLast?: boolean; onDismissChannel?: () => void; isContext?: boolean; showNewDivider?: boolean; onImageClick?: (src: string) => void; quickReplies?: string[];
 }) {
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   const [showThread, setShowThread] = useState(false);
@@ -5116,9 +5170,11 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
               <button
                 disabled={sending}
                 onClick={async () => {
-                  // Reply "Kollar på det!" and create a todo task
+                  // Reply with a random quick reply and create a todo task
+                  const replies = quickReplies?.length ? quickReplies : ["Kollar på det!"];
+                  const reply = replies[Math.floor(Math.random() * replies.length)];
                   const taskText = `[Slack] ${raw.senderName ?? "Someone"} in #${raw.channelName ?? "channel"}: "${(raw.text ?? "").slice(0, 120)}"`;
-                  sendReplyMessage("Kollar på det!");
+                  sendReplyMessage(reply);
                   await fetch("/api/todos", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -5126,9 +5182,9 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
                   });
                 }}
                 className="cursor-pointer text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 rounded px-1.5 py-0.5 transition-all flex items-center gap-1 text-[11px] font-medium disabled:opacity-50"
-                title="Reply 'Kollar på det!' and create a task"
+                title="Quick reply and create a task"
               >
-                <Zap size={11} /> Kollar på det!
+                <Zap size={11} /> Quick reply
               </button>
             </div>
           </div>

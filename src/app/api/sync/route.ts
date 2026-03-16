@@ -33,7 +33,7 @@ export async function POST(request: Request) {
       const sendItems = () => send("items", getItems());
 
       // Quick sync = any subset of phases (skips Linear, GitHub, Calendar)
-      const isQuickSync = slackPhases && slackPhases.length < 5;
+      const isQuickSync = slackPhases && slackPhases.length < 4;
       const tasks: Promise<void>[] = [];
 
       // Linear (skip on quick sync)
