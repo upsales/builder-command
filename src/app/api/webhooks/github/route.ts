@@ -3,7 +3,14 @@ import { getProfile, upsertItem } from "@/lib/items";
 
 export async function POST(request: NextRequest) {
   const event = request.headers.get("x-github-event");
-  const body = await request.json();
+  const contentType = request.headers.get("content-type") ?? "";
+  let body: Record<string, unknown>;
+  if (contentType.includes("application/x-www-form-urlencoded")) {
+    const form = await request.formData();
+    body = JSON.parse(form.get("payload") as string);
+  } else {
+    body = await request.json();
+  }
 
   const profile = getProfile();
   if (!profile?.github_username) {
