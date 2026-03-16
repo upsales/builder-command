@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getItems, getProfile, dismissItem, snoozeItem, upsertItem } from "@/lib/items";
 import { getDb, getSetting } from "@/lib/db";
 import { mergePR, enableAutoMerge, addReviewer } from "@/lib/integrations/github";
-import { updateIssueState, updateIssueAssignee, fetchSingleIssue } from "@/lib/integrations/linear";
+import { updateIssueState, updateIssueAssignee } from "@/lib/integrations/linear";
 import { notifyChange } from "@/lib/changeNotifier";
 import { sendReply, addReaction } from "@/lib/integrations/slack";
 import { searchRepo, readRepoFile, listRepoFiles, ensureRepo } from "@/lib/repo-cache";
@@ -12,6 +12,21 @@ import { join, resolve, relative } from "path";
 import { execSync, execFile } from "child_process";
 
 const SELF_REPO_PATH = process.cwd();
+
+/** Patch a Linear item's raw_data in the local DB without re-fetching from the API */
+function patchLocalLinearItem(issueId: string, patch: Record<string, unknown>) {
+  const db = getDb();
+  const row = db.prepare("SELECT source_id, raw_data FROM items WHERE source = 'linear'").all() as { source_id: string; raw_data: string | null }[];
+  const match = row.find(r => {
+    if (!r.raw_data) return false;
+    try { return JSON.parse(r.raw_data).id === issueId; } catch { return false; }
+  });
+  if (!match?.raw_data) return;
+  const data = JSON.parse(match.raw_data);
+  Object.assign(data, patch);
+  db.prepare("UPDATE items SET raw_data = ? WHERE source = 'linear' AND source_id = ?").run(JSON.stringify(data), match.source_id);
+  notifyChange();
+}
 
 export const tools: Anthropic.Tool[] = [
   {
@@ -439,20 +454,12 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
       }
       case "update_linear_status": {
         await updateIssueState(input.issue_id as string, input.state_id as string);
-        const updated = await fetchSingleIssue(input.issue_id as string);
-        if (updated) {
-          upsertItem({ source: "linear", source_id: updated.identifier, title: `[${updated.identifier}] ${updated.title}`, url: updated.url, raw_data: JSON.stringify(updated) });
-          notifyChange();
-        }
+        patchLocalLinearItem(input.issue_id as string, { stateId: input.state_id as string });
         return `Updated Linear issue status`;
       }
       case "assign_linear_issue": {
         await updateIssueAssignee(input.issue_id as string, (input.assignee_id as string) ?? null);
-        const updated = await fetchSingleIssue(input.issue_id as string);
-        if (updated) {
-          upsertItem({ source: "linear", source_id: updated.identifier, title: `[${updated.identifier}] ${updated.title}`, url: updated.url, raw_data: JSON.stringify(updated) });
-          notifyChange();
-        }
+        patchLocalLinearItem(input.issue_id as string, { assigneeId: (input.assignee_id as string) ?? null });
         return `Updated Linear issue assignment`;
       }
       case "reply_slack": {
