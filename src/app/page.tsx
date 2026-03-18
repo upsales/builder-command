@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from "react";
 import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, AlertCircle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, Zap, Plus, Trash2, Square, CheckSquare, Play, Pause, EyeOff, Search, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 function useLocalStorage<T>(key: string, defaultValue: T): [T, (v: T | ((prev: T) => T)) => void] {
   const [value, setValue] = useState<T>(() => {
@@ -775,7 +776,7 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                   ? "bg-accent text-white rounded-br-md whitespace-pre-wrap"
                   : "bg-card border border-border rounded-bl-md chat-markdown"
               }`}>
-                {msg.role === "assistant" ? <ReactMarkdown>{msg.content}</ReactMarkdown> : msg.content}
+                {msg.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown> : msg.content}
               </div>
               {msg.timestamp && (
                 <span className="text-[9px] text-muted/40 mt-0.5 px-1">
@@ -787,7 +788,7 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
           {streaming && streamingText && (
             <div className="flex justify-start">
               <div className="max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed bg-card border border-border rounded-bl-md chat-markdown">
-                <ReactMarkdown>{streamingText}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
                 <span className="inline-block w-1.5 h-4 bg-accent/60 ml-0.5 animate-pulse rounded-sm" />
               </div>
             </div>
@@ -1002,7 +1003,7 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                                   }`}>
                                     {bubble.text && (
                                       <div className="text-xs leading-relaxed chat-markdown">
-                                        <ReactMarkdown>{bubble.role === "agent" ? formatAgentText(bubble.text) : bubble.text}</ReactMarkdown>
+                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{bubble.role === "agent" ? formatAgentText(bubble.text) : bubble.text}</ReactMarkdown>
                                       </div>
                                     )}
                                     {bubble.toolNames && bubble.toolNames.length > 0 && (
@@ -4884,7 +4885,7 @@ function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef }: {
               ) : (
                 <div className="bg-card/50 rounded-lg px-3 py-2 border border-border/30">
                   <div className="text-xs text-foreground/80 leading-relaxed chat-markdown">
-                    <ReactMarkdown>{formatAgentText(msg.text)}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{formatAgentText(msg.text)}</ReactMarkdown>
                   </div>
                 </div>
               )}
