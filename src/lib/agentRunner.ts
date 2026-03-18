@@ -366,7 +366,7 @@ async function runSDKQuery(opts: {
           append: opts.appendPrompt,
         },
         mcpServers: { "bc-tools": mcpServer },
-        disallowedTools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent", "NotebookEdit"],  // Only our MCP tools
+        disallowedTools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent", "NotebookEdit", "WebFetch", "WebSearch", "ToolSearch", "TodoWrite", "TodoRead"],  // Only our MCP tools
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         env: getFixedEnv(),
