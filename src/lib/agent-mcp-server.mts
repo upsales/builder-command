@@ -74,7 +74,7 @@ server.tool("clone_repo", "Clone or update a GitHub repository for code explorat
 server.tool("web_fetch", "Fetch a web page and return its text content.", { url: z.string(), method: z.enum(["GET", "POST"]).optional(), body: z.string().optional() },
   async (args) => ({ content: [{ type: "text", text: await callTool("web_fetch", args) }] }));
 
-server.tool("api_fetch", "Make authenticated API calls to Linear or GitHub. Auth headers added automatically. Linear: POST https://api.linear.app/graphql. GitHub REST: GET/POST https://api.github.com/repos/{owner}/{repo}/pulls/{number}/files etc.", { url: z.string(), method: z.enum(["GET", "POST"]).optional(), body: z.string().optional(), accept: z.string().optional() },
+server.tool("api_fetch", "Make authenticated API calls to Linear, GitHub, or Clanker. Auth headers added automatically. Linear: POST https://api.linear.app/graphql. GitHub REST: GET/POST https://api.github.com/... Clanker: GET/POST https://clanker.upsales.com/api/...", { url: z.string(), method: z.enum(["GET", "POST"]).optional(), body: z.string().optional(), accept: z.string().optional() },
   async (args) => ({ content: [{ type: "text", text: await callTool("api_fetch", args) }] }));
 
 server.tool("browse_web", "Browse a website using a real browser (Playwright). Renders JavaScript, returns text + screenshot.", { action: z.enum(["navigate", "click", "type", "screenshot"]), url: z.string().optional(), selector: z.string().optional(), text: z.string().optional() },

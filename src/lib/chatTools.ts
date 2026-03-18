@@ -569,6 +569,8 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
         } else if (url.includes("api.github.com")) {
           headers["Authorization"] = `Bearer ${process.env.GITHUB_TOKEN ?? ""}`;
           if (!accept) headers["Accept"] = "application/vnd.github+json";
+        } else if (url.includes("clanker.upsales.com")) {
+          if (process.env.CLANKER_API_KEY) headers["X-API-Key"] = process.env.CLANKER_API_KEY;
         }
         const resp = await fetch(url, {
           method,
