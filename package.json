@@ -12,6 +12,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.2.77",
     "@anthropic-ai/sdk": "^0.78.0",
     "@linear/sdk": "^77.0.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@octokit/rest": "^22.0.1",
     "@slack/events-api": "^3.0.1",
     "@slack/socket-mode": "^2.0.5",

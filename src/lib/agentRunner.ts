@@ -371,6 +371,11 @@ async function runSDKQuery(opts: {
         allowDangerouslySkipPermissions: true,
         env: getFixedEnv(),
         abortController,
+        stderr: (data: string) => {
+          if (data.includes("error") || data.includes("Error") || data.includes("MCP") || data.includes("mcp")) {
+            console.log(`[AgentRunner:stderr] ${data.trim()}`);
+          }
+        },
         ...(opts.resumeSdkSessionId ? { resume: opts.resumeSdkSessionId } : {}),
       },
     })) {
