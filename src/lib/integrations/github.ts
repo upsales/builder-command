@@ -146,7 +146,7 @@ async function enrichPR(
     assignees: (item.assignees ?? []).map((a: { login: string }) => a.login),
     state: item.state,
     reviewRequested,
-    draft: false,
+    draft: item.draft ?? false,
     mergeable,
     mergeableState,
     reviewers,
