@@ -1,7 +1,7 @@
 import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { getDb, getSetting } from "@/lib/db";
-import { executeTool, buildSystemPrompt } from "@/lib/chatTools";
+import { executeTool } from "@/lib/chatTools";
 import { notifyChange } from "@/lib/changeNotifier";
 import { randomUUID } from "crypto";
 import { dirname } from "path";
@@ -265,18 +265,56 @@ function getSourceContext(source?: string, sourceId?: string): string {
 
 // --- Build the agent prompt appended to Claude Code's default system prompt ---
 
+function buildAgentContext(): string {
+  const db = getDb();
+  const { getProfile } = require("@/lib/items");
+  const profile = getProfile();
+
+  // Agent memories
+  const memories = db.prepare("SELECT id, content, category FROM agent_memories ORDER BY category, created_at").all() as { id: string; content: string; category: string }[];
+  let memorySection = "No memories saved yet.";
+  if (memories.length > 0) {
+    const byCategory = new Map<string, { id: string; content: string }[]>();
+    for (const m of memories) {
+      if (!byCategory.has(m.category)) byCategory.set(m.category, []);
+      byCategory.get(m.category)!.push(m);
+    }
+    memorySection = Array.from(byCategory.entries()).map(([cat, mems]) =>
+      `### ${cat}\n${mems.map(m => `- [${m.id}] ${m.content}`).join("\n")}`
+    ).join("\n");
+  }
+
+  // User instructions
+  const userInstructions = getSetting("agent_prompt") || "No custom instructions set.";
+
+  return `## Profile
+- GitHub: ${profile?.github_username ?? "not set"}
+- Linear: ${profile?.linear_email ?? "not set"}
+
+## Agent Memory
+${memorySection}
+
+## User Instructions
+${userInstructions}`;
+}
+
 function buildAgentAppendPrompt(taskText: string, opts: {
   sourceContext: string;
   agentPrompt?: string;
   isFollowUp?: boolean;
 }): string {
-  const baseContext = buildSystemPrompt();
+  const agentContext = buildAgentContext();
   const mode = opts.isFollowUp ? "AGENT MODE (Follow-up)" : "AGENT MODE";
   const modeDesc = opts.isFollowUp
-    ? "You are an autonomous AI agent continuing work on a task. The user has sent a follow-up message."
-    : "You are an autonomous AI agent. You've been assigned a specific task to complete.";
+    ? "You are continuing work on a previously assigned task."
+    : "You've been assigned a specific task to complete.";
 
-  return `${baseContext}
+  return `## Role
+You are an executive assistant for a software engineering leader. Your job is admin work, research, troubleshooting, and operational tasks — NOT coding. Typical tasks include: reviewing and triaging PRs, looking up information via APIs, investigating issues, summarizing findings, managing Linear tickets, replying on Slack, and coordinating work.
+
+You have access to GitHub and Linear APIs (via api_fetch), web browsing, code search (read-only), and integrations with Slack, GitHub, and Linear. Use these tools proactively to gather information and take action.
+
+${agentContext}
 
 ## ${mode}
 ${modeDesc}
@@ -320,7 +358,7 @@ async function runSDKQuery(opts: {
     for await (const message of query({
       prompt: opts.prompt,
       options: {
-        model: "claude-sonnet-4-20250514",
+        model: "claude-opus-4-20250514",
         maxTurns: getMaxRounds(),
         systemPrompt: {
           type: "preset",
