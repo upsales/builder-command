@@ -1,10 +1,10 @@
-import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
-import { z } from "zod";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { getDb, getSetting } from "@/lib/db";
 import { executeTool } from "@/lib/chatTools";
 import { notifyChange } from "@/lib/changeNotifier";
 import { randomUUID } from "crypto";
-import { dirname } from "path";
+import { dirname, join } from "path";
+import { createServer, type Server } from "http";
 
 function getMaxRounds(): number {
   const setting = getSetting("agent_max_rounds");
@@ -15,70 +15,43 @@ function getMaxRounds(): number {
   return 30;
 }
 
-// --- SDK MCP Tools ---
-// Wrap each tool from chatTools.ts in SDK format using tool() helper.
-// Each tool calls executeTool() which has the actual implementation.
+// --- Tool callback server ---
+// Starts a tiny HTTP server that the MCP stdio server calls to execute tools.
+// This avoids Next.js bundling issues with in-process MCP servers.
 
-function buildMcpServer(sessionId: string, abortController: AbortController) {
-  const ctx = { sessionId };
-
-  const sdkTools = [
-    tool("dismiss_item", "Dismiss/clear an item from the user's queue.", { source: z.enum(["linear", "github", "slack", "calendar"]), source_id: z.string() },
-      async (args) => { const r = await executeTool("dismiss_item", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("snooze_item", "Snooze an item so it reappears later.", { source: z.enum(["linear", "github", "slack", "calendar"]), source_id: z.string(), duration: z.enum(["1h", "2h", "4h", "tomorrow", "next_week"]) },
-      async (args) => { const r = await executeTool("snooze_item", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("merge_pr", "Merge a GitHub pull request.", { repo: z.string(), pr_number: z.number() },
-      async (args) => { const r = await executeTool("merge_pr", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("enable_auto_merge", "Enable auto-merge on a PR so it merges when checks pass.", { repo: z.string(), pr_number: z.number() },
-      async (args) => { const r = await executeTool("enable_auto_merge", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("add_reviewer", "Request a review from someone on a GitHub PR.", { repo: z.string(), pr_number: z.number(), reviewer: z.string() },
-      async (args) => { const r = await executeTool("add_reviewer", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("update_linear_status", "Change the status of a Linear issue.", { issue_id: z.string(), state_id: z.string() },
-      async (args) => { const r = await executeTool("update_linear_status", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("assign_linear_issue", "Assign a Linear issue to someone.", { issue_id: z.string(), assignee_id: z.string().optional() },
-      async (args) => { const r = await executeTool("assign_linear_issue", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("reply_slack", "Send a reply in a Slack thread.", { channel: z.string(), text: z.string(), thread_ts: z.string() },
-      async (args) => { const r = await executeTool("reply_slack", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("react_slack", "Add an emoji reaction to a Slack message.", { channel: z.string(), timestamp: z.string(), reaction: z.string() },
-      async (args) => { const r = await executeTool("react_slack", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("create_todo", "Create a new todo item for the user.", { text: z.string(), persistent: z.boolean().optional() },
-      async (args) => { const r = await executeTool("create_todo", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("complete_todo", "Mark a todo item as done.", { todo_id: z.string() },
-      async (args) => { const r = await executeTool("complete_todo", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("search_code", "Search for code patterns in a GitHub repository.", { repo: z.string(), query: z.string(), branch: z.string().optional() },
-      async (args) => { const r = await executeTool("search_code", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("read_file", "Read a file from a cloned repo. Use repo='self' for Builder Command's own code.", { repo: z.string(), path: z.string(), branch: z.string().optional() },
-      async (args) => { const r = await executeTool("read_file", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("list_files", "List files in a directory of a cloned repository.", { repo: z.string(), directory: z.string().optional(), branch: z.string().optional() },
-      async (args) => { const r = await executeTool("list_files", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("clone_repo", "Clone or update a GitHub repository for code exploration.", { repo: z.string() },
-      async (args) => { const r = await executeTool("clone_repo", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("web_fetch", "Fetch a web page and return its text content.", { url: z.string(), method: z.enum(["GET", "POST"]).optional(), headers: z.record(z.string()).optional(), body: z.string().optional() },
-      async (args) => { const r = await executeTool("web_fetch", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("api_fetch", "Make authenticated API calls to Linear or GitHub. Auth headers added automatically. Linear: POST https://api.linear.app/graphql. GitHub REST: GET/POST https://api.github.com/repos/{owner}/{repo}/pulls/{number}/files etc.", { url: z.string(), method: z.enum(["GET", "POST"]).optional(), body: z.string().optional(), accept: z.string().optional() },
-      async (args) => { const r = await executeTool("api_fetch", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("browse_web", "Browse a website using a real browser (Playwright). Renders JavaScript, returns text + screenshot. Actions: navigate (go to URL), click (CSS selector or text), type (into input), screenshot (current page).", { action: z.enum(["navigate", "click", "type", "screenshot"]), url: z.string().optional(), selector: z.string().optional(), text: z.string().optional() },
-      async (args) => { const r = await executeTool("browse_web", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("save_memory", "Save a fact or preference to persistent memory.", { content: z.string(), category: z.enum(["user", "team", "workflow", "repo", "general"]).optional() },
-      async (args) => { const r = await executeTool("save_memory", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("delete_memory", "Delete a memory that is no longer relevant.", { memory_id: z.string() },
-      async (args) => { const r = await executeTool("delete_memory", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("execute_code", "Execute code in a sandboxed subprocess. 30s timeout.", { language: z.enum(["javascript", "python"]), code: z.string() },
-      async (args) => { const r = await executeTool("execute_code", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("write_file", "Write content to a file in the agent workspace (data/workspace/).", { path: z.string(), content: z.string() },
-      async (args) => { const r = await executeTool("write_file", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("edit_file", "Find and replace text in a file in the agent workspace.", { path: z.string(), find: z.string(), replace: z.string() },
-      async (args) => { const r = await executeTool("edit_file", args, ctx); return { content: [{ type: "text" as const, text: r }] }; }),
-    tool("schedule_followup", "Schedule yourself to wake up later and continue working. Session ends after this call.", { delay: z.enum(["5m", "10m", "15m", "30m", "1h", "2h", "4h"]), instruction: z.string() },
-      async (args) => {
-        const r = await executeTool("schedule_followup", args, ctx);
-        // Abort the SDK loop after scheduling — session should end gracefully
-        abortController.abort();
-        return { content: [{ type: "text" as const, text: r }] };
-      }),
-  ];
-
-  return createSdkMcpServer({ name: "builder-command-tools", tools: sdkTools });
+function startToolCallbackServer(sessionId: string, abortController: AbortController): Promise<{ url: string; server: Server }> {
+  return new Promise((resolve) => {
+    const ctx = { sessionId };
+    const server = createServer(async (req, res) => {
+      if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", async () => {
+        try {
+          const { name, args } = JSON.parse(body);
+          console.log(`[AgentRunner] Tool call: ${name}`);
+          const result = await executeTool(name, args, ctx);
+          // If schedule_followup, abort the SDK loop
+          if (name === "schedule_followup") {
+            setTimeout(() => abortController.abort(), 100);
+          }
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end(result);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error(`[AgentRunner] Tool error: ${msg}`);
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end(`Error: ${msg}`);
+        }
+      });
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address() as { port: number };
+      const url = `http://127.0.0.1:${addr.port}`;
+      console.log(`[AgentRunner] Tool callback server on ${url}`);
+      resolve({ url, server });
+    });
+  });
 }
 
 // --- Environment ---
@@ -343,10 +316,11 @@ async function runSDKQuery(opts: {
   resumeSdkSessionId?: string;
 }): Promise<{ sdkSessionId: string; resultText: string; toolCallsLog: ToolCallLog[]; collectedMessages: unknown[]; status: "completed" | "waiting" | "incomplete"; errorMsg?: string }> {
   const abortController = new AbortController();
-  const mcpServer = buildMcpServer(opts.sessionId, abortController);
+  const { url: callbackUrl, server: callbackServer } = await startToolCallbackServer(opts.sessionId, abortController);
+
+  const mcpServerScript = join(process.cwd(), "src", "lib", "agent-mcp-server.mts");
 
   const toolCallsLog: ToolCallLog[] = [];
-  // Collect messages in Anthropic MessageParam format for UI compatibility
   const collectedMessages: { role: "user" | "assistant"; content: unknown }[] = [];
   let resultText = "";
   let sdkSessionId = opts.resumeSdkSessionId || "";
@@ -365,8 +339,15 @@ async function runSDKQuery(opts: {
           preset: "claude_code",
           append: opts.appendPrompt,
         },
-        mcpServers: { "bc-tools": mcpServer },
-        disallowedTools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent", "NotebookEdit", "WebFetch", "WebSearch", "ToolSearch", "TodoWrite", "TodoRead"],  // Only our MCP tools
+        mcpServers: {
+          "bc-tools": {
+            type: "stdio" as const,
+            command: "npx",
+            args: ["tsx", mcpServerScript],
+            env: { BC_TOOL_CALLBACK_URL: callbackUrl },
+          },
+        },
+        disallowedTools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent", "NotebookEdit", "WebFetch", "WebSearch", "ToolSearch", "TodoWrite", "TodoRead"],
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         env: getFixedEnv(),
@@ -446,10 +427,12 @@ async function runSDKQuery(opts: {
     if (isAbort) {
       status = "waiting";
     } else {
+      callbackServer.close();
       throw e;
     }
   }
 
+  callbackServer.close();
   return { sdkSessionId, resultText, toolCallsLog, collectedMessages, status };
 }
 
