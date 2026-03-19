@@ -321,7 +321,10 @@ async function runSDKQuery(opts: {
   const mcpServerScript = join(process.cwd(), "src", "lib", "agent-mcp-server.mts");
 
   const toolCallsLog: ToolCallLog[] = [];
-  const collectedMessages: { role: "user" | "assistant"; content: unknown }[] = [];
+  // Inject the user prompt as the first message so the UI can display it
+  const collectedMessages: { role: "user" | "assistant"; content: unknown }[] = [
+    { role: "user", content: opts.prompt },
+  ];
   let resultText = "";
   let sdkSessionId = opts.resumeSdkSessionId || "";
   let status: "completed" | "waiting" | "incomplete" = "completed";
