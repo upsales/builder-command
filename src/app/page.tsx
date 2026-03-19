@@ -4860,7 +4860,7 @@ function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef }: {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: session.id, follow_up: text }),
     }).then(() => {
-      setFullData(null); // force re-fetch when done
+      // Don't clear fullData — polling will update it. Just clear optimistic state when done.
       setOptimisticMessages([]);
       setOptimisticRunning(false);
       onRefresh?.();

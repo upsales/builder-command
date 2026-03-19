@@ -314,15 +314,18 @@ async function runSDKQuery(opts: {
   prompt: string;
   appendPrompt: string;
   resumeSdkSessionId?: string;
+  existingMessages?: unknown[];
+  existingToolCalls?: ToolCallLog[];
 }): Promise<{ sdkSessionId: string; resultText: string; toolCallsLog: ToolCallLog[]; collectedMessages: unknown[]; status: "completed" | "waiting" | "incomplete"; errorMsg?: string }> {
   const abortController = new AbortController();
   const { url: callbackUrl, server: callbackServer } = await startToolCallbackServer(opts.sessionId, abortController);
 
   const mcpServerScript = join(process.cwd(), "src", "lib", "agent-mcp-server.mts");
 
-  const toolCallsLog: ToolCallLog[] = [];
-  // Inject the user prompt as the first message so the UI can display it
+  const toolCallsLog: ToolCallLog[] = [...(opts.existingToolCalls ?? [])];
+  // Prepend existing messages + inject the user prompt so the UI can display them
   const collectedMessages: { role: "user" | "assistant"; content: unknown }[] = [
+    ...(opts.existingMessages ?? []) as { role: "user" | "assistant"; content: unknown }[],
     { role: "user", content: opts.prompt },
   ];
   let resultText = "";
@@ -532,26 +535,25 @@ export async function continueSession(sessionId: string, followUpText: string): 
     isFollowUp: true,
   });
 
+  // Parse existing data before running — so in-progress writes include full history
+  let existingToolCalls: ToolCallLog[] = [];
+  if (session.tool_calls) {
+    try { existingToolCalls = JSON.parse(session.tool_calls); } catch { /* start fresh */ }
+  }
+  let existingMessages: unknown[] = [];
+  if (session.messages) {
+    try { existingMessages = JSON.parse(session.messages); } catch { /* start fresh */ }
+  }
+
   try {
     const result = await runSDKQuery({
       sessionId,
       prompt: followUpText,
       appendPrompt,
       resumeSdkSessionId: session.sdk_session_id || undefined,
+      existingMessages,
+      existingToolCalls,
     });
-
-    // Merge tool calls and messages from previous session
-    let existingToolCalls: ToolCallLog[] = [];
-    if (session.tool_calls) {
-      try { existingToolCalls = JSON.parse(session.tool_calls); } catch { /* start fresh */ }
-    }
-    const allToolCalls = [...existingToolCalls, ...result.toolCallsLog];
-
-    let existingMessages: unknown[] = [];
-    if (session.messages) {
-      try { existingMessages = JSON.parse(session.messages); } catch { /* start fresh */ }
-    }
-    const allMessages = [...existingMessages, ...result.collectedMessages];
 
     const summary = extractSummary(result.resultText);
 
@@ -560,8 +562,8 @@ export async function continueSession(sessionId: string, followUpText: string): 
     ).run(
       result.status,
       summary || (result.status === "incomplete" ? "Agent ran out of turns. You can continue the session." : null),
-      JSON.stringify(allToolCalls),
-      JSON.stringify(allMessages),
+      JSON.stringify(result.toolCallsLog),
+      JSON.stringify(result.collectedMessages),
       result.sdkSessionId,
       sessionId
     );
