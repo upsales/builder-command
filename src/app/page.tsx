@@ -962,10 +962,10 @@ const ChatPanel = forwardRef<ChatPanelHandle>(function ChatPanel(_props, ref) {
                     return Array.from(map, ([name, count]) => ({ name, count }));
                   };
 
-                  // Inject custom prompt after first user message if present
+                  // Inject custom prompt after the initial task message (not follow-ups)
                   if (agentSessionData.agent_prompt && chatBubbles.length > 0) {
                     const firstUserIdx = chatBubbles.findIndex(b => b.role === "user");
-                    if (firstUserIdx >= 0) {
+                    if (firstUserIdx >= 0 && chatBubbles[firstUserIdx].text.startsWith("Work on this task:")) {
                       chatBubbles.splice(firstUserIdx + 1, 0, { role: "user", text: `**Custom instructions:** ${agentSessionData.agent_prompt}` });
                     }
                   }
@@ -4824,6 +4824,13 @@ function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef }: {
       flushRound(); // flush last round
     } catch { /* ignore */ }
   }
+  // Ensure there's always an initial user message (for old sessions without it)
+  const todoText = (fullData as Record<string, unknown>)?.todo_text as string | undefined ??
+    (fullData as Record<string, unknown>)?.todoText as string | undefined;
+  if (chatMessages.length === 0 || !chatMessages.some(m => m.role === "user")) {
+    if (todoText) chatMessages.unshift({ role: "user", text: todoText });
+  }
+
   // Always ensure the summary/answer is shown
   if (summaryText) {
     const lastAgent = [...chatMessages].reverse().find(m => m.role === "agent");
