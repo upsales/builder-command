@@ -5437,9 +5437,20 @@ function SlackMessage({ item, onDismiss, isLast, onDismissChannel, isContext, sh
                           });
                         }} className="cursor-pointer hover:bg-card-hover rounded px-0.5 py-0.5 hover:scale-125 transition-all text-xs leading-none">{emoji}</button>
                       ))}
-                      <button onClick={() => { setShowReply(true); setReplyText(`> ${reply.text?.substring(0, 50)}...\n`); }}
-                        className="cursor-pointer text-emerald-400/60 hover:text-emerald-300 rounded px-1 py-0.5 transition-all text-[10px]" title="Reply">
-                        <MessageSquare size={10} />
+                      <div className="w-px h-3 bg-border/30 mx-0.5" />
+                      <button onClick={() => { setShowReply(true); setReplyText(""); }}
+                        className="cursor-pointer text-emerald-400/60 hover:text-emerald-300 rounded px-1 py-0.5 transition-all text-[10px] flex items-center gap-0.5" title="Reply">
+                        <MessageSquare size={9} /> Reply
+                      </button>
+                      <button
+                        disabled={sending}
+                        onClick={async () => {
+                          const qr = quickReplies?.length ? quickReplies : ["Kollar på det!"];
+                          const text = qr[Math.floor(Math.random() * qr.length)];
+                          sendReplyMessage(text);
+                        }}
+                        className="cursor-pointer text-amber-400/60 hover:text-amber-300 rounded px-1 py-0.5 transition-all text-[10px] flex items-center gap-0.5 disabled:opacity-50" title="Quick reply">
+                        <Zap size={9} /> Quick reply
                       </button>
                     </div>
                   </div>
