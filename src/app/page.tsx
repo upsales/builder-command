@@ -4772,28 +4772,24 @@ function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef }: {
     return () => clearInterval(interval);
   }, [expanded, isRunning, session.id]);
 
-  // Parse messages into a clean Q&A view: user questions + agent final answers only
+  // Parse messages into a clean Q&A view: user prompts + agent final answers only
   const chatMessages: { role: "user" | "agent"; text: string }[] = [];
   const summaryText = (fullData as Record<string, unknown>)?.summary as string | undefined ?? session.summary;
   const failureText = (fullData as Record<string, unknown>)?.failure_reason as string | undefined ?? session.failure_reason;
+  const sessionStatus = (fullData as Record<string, unknown>)?.status as string | undefined ?? session.status;
+  const todoText = (fullData as Record<string, unknown>)?.todo_text as string | undefined ??
+    (fullData as Record<string, unknown>)?.todoText as string | undefined;
+
   if (fullData?.messages) {
     try {
       const msgs = JSON.parse(fullData.messages);
-      // Group messages into rounds: each user message starts a new round
-      // For each round, keep the user message and only the LAST assistant text (the answer, not intermediate thinking)
-      let currentUserText: string | null = null;
-      let lastAgentText: string | null = null;
-
-      const flushRound = () => {
-        if (currentUserText) chatMessages.push({ role: "user", text: currentUserText });
-        if (lastAgentText) chatMessages.push({ role: "agent", text: lastAgentText });
-        currentUserText = null;
-        lastAgentText = null;
-      };
+      // Collect user text messages and the last agent text per round
+      // A "round" starts with each user text message
+      const rounds: { user: string; agentTexts: string[] }[] = [];
+      let currentRound: { user: string; agentTexts: string[] } | null = null;
 
       for (const msg of msgs) {
         if (msg.role === "user") {
-          // Extract text from user messages, skip tool_result blocks
           let text: string | null = null;
           if (typeof msg.content === "string") {
             text = msg.content;
@@ -4805,11 +4801,10 @@ function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef }: {
             }
           }
           if (text) {
-            flushRound(); // flush previous round
-            currentUserText = text;
+            if (currentRound) rounds.push(currentRound);
+            currentRound = { user: text, agentTexts: [] };
           }
         } else if (msg.role === "assistant") {
-          // Keep overwriting lastAgentText — we only want the final one per round
           const texts: string[] = [];
           if (Array.isArray(msg.content)) {
             for (const block of msg.content) {
@@ -4818,20 +4813,29 @@ function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef }: {
           } else if (typeof msg.content === "string" && msg.content.trim()) {
             texts.push(msg.content);
           }
-          if (texts.length > 0) lastAgentText = texts.join("\n\n");
+          if (texts.length > 0 && currentRound) {
+            currentRound.agentTexts.push(texts.join("\n\n"));
+          }
         }
       }
-      flushRound(); // flush last round
+      if (currentRound) rounds.push(currentRound);
+
+      // For each round, show user message + only the last agent text (the final answer)
+      for (const round of rounds) {
+        chatMessages.push({ role: "user", text: round.user });
+        if (round.agentTexts.length > 0) {
+          chatMessages.push({ role: "agent", text: round.agentTexts[round.agentTexts.length - 1] });
+        }
+      }
     } catch { /* ignore */ }
   }
+
   // Ensure there's always an initial user message (for old sessions without it)
-  const todoText = (fullData as Record<string, unknown>)?.todo_text as string | undefined ??
-    (fullData as Record<string, unknown>)?.todoText as string | undefined;
-  if (chatMessages.length === 0 || !chatMessages.some(m => m.role === "user")) {
-    if (todoText) chatMessages.unshift({ role: "user", text: todoText });
+  if (!chatMessages.some(m => m.role === "user") && todoText) {
+    chatMessages.unshift({ role: "user", text: todoText });
   }
 
-  // Always ensure the summary/answer is shown
+  // Always ensure the summary is shown as the final agent message
   if (summaryText) {
     const lastAgent = [...chatMessages].reverse().find(m => m.role === "agent");
     if (!lastAgent || !lastAgent.text.includes(summaryText.slice(0, 80))) {
@@ -4901,6 +4905,16 @@ function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef }: {
           {isRunning && (
             <div className="flex items-center gap-1.5 text-xs text-muted">
               <Loader2 size={12} className="animate-spin text-purple-400" /> Processing...
+            </div>
+          )}
+          {!isRunning && sessionStatus === "incomplete" && (
+            <div className="text-[10px] text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded px-2.5 py-1.5 flex items-center gap-1.5">
+              <AlertCircle size={11} /> Ran out of rounds — send a follow-up to continue
+            </div>
+          )}
+          {!isRunning && sessionStatus === "waiting" && (
+            <div className="text-[10px] text-blue-400/80 bg-blue-500/10 border border-blue-500/20 rounded px-2.5 py-1.5 flex items-center gap-1.5">
+              <Clock size={11} /> Waiting for scheduled follow-up
             </div>
           )}
           {/* Follow-up input */}
