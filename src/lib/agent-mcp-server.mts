@@ -98,6 +98,24 @@ server.tool("edit_file", "Find and replace text in a file in the agent workspace
 server.tool("schedule_followup", "Schedule yourself to wake up later and continue working. Session ends after this call.", { delay: z.enum(["5m", "10m", "15m", "30m", "1h", "2h", "4h"]), instruction: z.string() },
   async (args) => ({ content: [{ type: "text", text: await callTool("schedule_followup", args) }] }));
 
+server.tool("submit_pr_review", "Submit a review on a GitHub PR (approve, request changes, or comment). Can include inline comments on specific file lines.", { repo: z.string(), pr_number: z.number(), event: z.enum(["APPROVE", "REQUEST_CHANGES", "COMMENT"]), body: z.string(), comments: z.array(z.object({ path: z.string(), line: z.number(), body: z.string() })).optional() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("submit_pr_review", args) }] }));
+
+server.tool("comment_pr", "Post a general comment on a GitHub PR or issue.", { repo: z.string(), pr_number: z.number(), body: z.string() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("comment_pr", args) }] }));
+
+server.tool("get_pr_diff", "Get the full diff for a GitHub PR.", { repo: z.string(), pr_number: z.number() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("get_pr_diff", args) }] }));
+
+server.tool("get_pr_details", "Get comprehensive PR details: title, description, reviews, comments, files changed, merge status.", { repo: z.string(), pr_number: z.number() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("get_pr_details", args) }] }));
+
+server.tool("search_linear", "Search Linear issues by text. Returns matching issues with status, priority, assignee.", { query: z.string(), limit: z.number().optional() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("search_linear", args) }] }));
+
+server.tool("web_search", "Search the web via DuckDuckGo. Returns titles, URLs, and snippets.", { query: z.string(), max_results: z.number().optional() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("web_search", args) }] }));
+
 // Start the server
 const transport = new StdioServerTransport();
 await server.connect(transport);

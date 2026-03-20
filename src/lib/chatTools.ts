@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { getItems, getProfile, dismissItem, snoozeItem, upsertItem } from "@/lib/items";
 import { getDb, getSetting } from "@/lib/db";
-import { mergePR, enableAutoMerge, addReviewer } from "@/lib/integrations/github";
+import { mergePR, enableAutoMerge, addReviewer, submitPRReview, commentOnPR, fetchPRDiff, fetchPRDetails } from "@/lib/integrations/github";
 import { updateIssueState, updateIssueAssignee } from "@/lib/integrations/linear";
 import { notifyChange } from "@/lib/changeNotifier";
 import { sendReply, addReaction } from "@/lib/integrations/slack";
@@ -361,6 +361,99 @@ Supported languages: javascript (Node.js), python (Python 3).
       required: ["path", "find", "replace"],
     },
   },
+  {
+    name: "submit_pr_review",
+    description: `Submit a review on a GitHub pull request. Use this to approve, request changes, or leave a general comment on a PR. You can optionally include inline comments on specific files/lines.
+
+Examples:
+- Approve: event="APPROVE", body="LGTM, looks good!"
+- Request changes: event="REQUEST_CHANGES", body="A few issues to address", comments=[{path: "src/foo.ts", line: 42, body: "This could cause a null pointer"}]
+- Comment only: event="COMMENT", body="Some thoughts on the approach"`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        pr_number: { type: "number", description: "PR number" },
+        event: { type: "string", enum: ["APPROVE", "REQUEST_CHANGES", "COMMENT"], description: "Review action" },
+        body: { type: "string", description: "Review body text" },
+        comments: {
+          type: "array",
+          description: "Optional inline comments on specific file lines",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "File path in the PR" },
+              line: { type: "number", description: "Line number in the diff" },
+              body: { type: "string", description: "Comment text" },
+            },
+            required: ["path", "line", "body"],
+          },
+        },
+      },
+      required: ["repo", "pr_number", "event", "body"],
+    },
+  },
+  {
+    name: "comment_pr",
+    description: "Post a general comment on a GitHub pull request or issue. Use for non-review comments like questions, status updates, or summaries.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        pr_number: { type: "number", description: "PR or issue number" },
+        body: { type: "string", description: "Comment body (supports markdown)" },
+      },
+      required: ["repo", "pr_number", "body"],
+    },
+  },
+  {
+    name: "get_pr_diff",
+    description: "Get the full diff for a GitHub pull request. Use this before reviewing a PR to understand what changed. Returns the unified diff plus file-level summary.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        pr_number: { type: "number", description: "PR number" },
+      },
+      required: ["repo", "pr_number"],
+    },
+  },
+  {
+    name: "get_pr_details",
+    description: "Get comprehensive details about a PR: title, description, reviews, comments, files changed, merge status. Use this as a starting point when investigating a PR.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        pr_number: { type: "number", description: "PR number" },
+      },
+      required: ["repo", "pr_number"],
+    },
+  },
+  {
+    name: "search_linear",
+    description: "Search Linear issues by text query. Returns matching issues with their status, priority, and assignee. Much faster than writing raw GraphQL.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: { type: "string", description: "Search text (searches title and description)" },
+        limit: { type: "number", description: "Max results (default: 10, max: 50)" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "web_search",
+    description: "Search the web using DuckDuckGo. Returns titles, URLs, and snippets. Use this for research tasks — finding documentation, looking up errors, investigating technologies, etc.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: { type: "string", description: "Search query" },
+        max_results: { type: "number", description: "Max results to return (default: 8, max: 20)" },
+      },
+      required: ["query"],
+    },
+  },
 ];
 
 const WORKSPACE_DIR = join(process.cwd(), "data", "workspace");
@@ -655,6 +748,85 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
         const updated = content.replace(find, input.replace as string);
         writeFileSync(filePath, updated, "utf-8");
         return `Edited workspace/${input.path} — replaced ${find.length} chars`;
+      }
+      case "submit_pr_review": {
+        const result = await submitPRReview(
+          input.repo as string,
+          input.pr_number as number,
+          input.event as "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+          input.body as string,
+          input.comments as { path: string; line: number; body: string }[] | undefined,
+        );
+        return result.success ? `Review submitted (${input.event}) on PR #${input.pr_number}` : `Failed: ${result.message}`;
+      }
+      case "comment_pr": {
+        const result = await commentOnPR(
+          input.repo as string,
+          input.pr_number as number,
+          input.body as string,
+        );
+        return result.success ? `Comment posted on PR #${input.pr_number}` : `Failed: ${result.message}`;
+      }
+      case "get_pr_diff": {
+        return await fetchPRDiff(input.repo as string, input.pr_number as number);
+      }
+      case "get_pr_details": {
+        return await fetchPRDetails(input.repo as string, input.pr_number as number);
+      }
+      case "search_linear": {
+        const searchQuery = input.query as string;
+        const limit = Math.min((input.limit as number) ?? 10, 50);
+        const linearKey = process.env.LINEAR_API_KEY;
+        if (!linearKey) return "Error: LINEAR_API_KEY not configured";
+        const resp = await fetch("https://api.linear.app/graphql", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": linearKey },
+          body: JSON.stringify({
+            query: `query($q: String!, $first: Int!) {
+              issueSearch(query: $q, first: $first) {
+                nodes { id identifier title description state { name } priority assignee { name } labels { nodes { name } } url }
+              }
+            }`,
+            variables: { q: searchQuery, first: limit },
+          }),
+        });
+        const data = await resp.json() as { data?: { issueSearch?: { nodes: { id: string; identifier: string; title: string; description?: string; state: { name: string }; priority: number; assignee?: { name: string }; labels: { nodes: { name: string }[] }; url: string }[] } } };
+        const issues = data.data?.issueSearch?.nodes ?? [];
+        if (issues.length === 0) return `No Linear issues found for "${searchQuery}"`;
+        const priorities = ["None", "Urgent", "High", "Medium", "Low"];
+        return issues.map(i =>
+          `${i.identifier}: ${i.title}\n  State: ${i.state.name} | Priority: ${priorities[i.priority ?? 0]} | Assignee: ${i.assignee?.name ?? "unassigned"}${i.labels.nodes.length ? ` | Labels: ${i.labels.nodes.map(l => l.name).join(", ")}` : ""}\n  ${i.url}`
+        ).join("\n\n");
+      }
+      case "web_search": {
+        const searchQuery = input.query as string;
+        const maxResults = Math.min((input.max_results as number) ?? 8, 20);
+        try {
+          // Use DuckDuckGo HTML search (no API key needed)
+          const encodedQuery = encodeURIComponent(searchQuery);
+          const resp = await fetch(`https://html.duckduckgo.com/html/?q=${encodedQuery}`, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (compatible; BuilderAgent/1.0)",
+            },
+          });
+          const html = await resp.text();
+          // Parse results from DDG HTML
+          const results: { title: string; url: string; snippet: string }[] = [];
+          const resultRegex = /<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+          let match;
+          while ((match = resultRegex.exec(html)) !== null && results.length < maxResults) {
+            const url = match[1].replace(/\/\/duckduckgo\.com\/l\/\?uddg=/, "").split("&")[0];
+            const title = match[2].replace(/<[^>]+>/g, "").trim();
+            const snippet = match[3].replace(/<[^>]+>/g, "").trim();
+            if (title && url) {
+              results.push({ title, url: decodeURIComponent(url), snippet });
+            }
+          }
+          if (results.length === 0) return `No web search results for "${searchQuery}"`;
+          return results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join("\n\n");
+        } catch (e) {
+          return `Web search error: ${e instanceof Error ? e.message : String(e)}`;
+        }
       }
       default:
         return `Unknown tool: ${name}`;

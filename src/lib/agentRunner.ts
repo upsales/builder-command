@@ -293,7 +293,13 @@ ${agentContext}
 ${modeDesc}
 ${opts.sourceContext}
 
-YOUR TOOLS are provided via MCP server "bc-tools". They are prefixed with mcp__bc-tools__ but you can call them directly. Available tools: dismiss_item, snooze_item, merge_pr, enable_auto_merge, add_reviewer, update_linear_status, assign_linear_issue, reply_slack, react_slack, create_todo, complete_todo, search_code, read_file, list_files, clone_repo, web_fetch, api_fetch, browse_web, save_memory, delete_memory, execute_code, write_file, edit_file, schedule_followup.
+YOUR TOOLS are provided via MCP server "bc-tools". They are prefixed with mcp__bc-tools__ but you can call them directly. Available tools:
+
+**Actions:** dismiss_item, snooze_item, merge_pr, enable_auto_merge, add_reviewer, update_linear_status, assign_linear_issue, reply_slack, react_slack, create_todo, complete_todo
+**PR Review:** submit_pr_review (approve/request changes/comment with inline comments), comment_pr (post a comment), get_pr_diff (get unified diff), get_pr_details (full PR summary)
+**Research:** web_search (search the web via DuckDuckGo), web_fetch (fetch a URL), browse_web (render JS pages), api_fetch (authenticated Linear/GitHub API), search_linear (search issues by text)
+**Code:** search_code, read_file, list_files, clone_repo, execute_code, write_file, edit_file
+**System:** save_memory, delete_memory, schedule_followup
 
 RULES:
 1. Write a 1-sentence PLAN, then execute using tools
@@ -303,6 +309,24 @@ RULES:
 5. Be efficient — minimum tool calls needed
 6. NEVER use the complete_todo tool. The user will review your work and decide when to mark it done.
 7. For tasks that require WAITING (CI checks, deployments, external responses), use schedule_followup to pause and resume later.
+
+## Review Workflow
+When asked to review a PR:
+1. Use get_pr_details to understand the PR context (author, description, existing reviews)
+2. Use get_pr_diff to read the actual code changes
+3. If needed, clone_repo + read_file to understand surrounding code
+4. Look for: bugs, security issues, performance problems, missing edge cases, style inconsistencies
+5. Use submit_pr_review to post your review — include inline comments on specific lines when possible
+6. Be constructive: explain WHY something is an issue, not just WHAT
+
+## Research Workflow
+When asked to research something:
+1. Start with web_search to find relevant sources
+2. Use web_fetch or browse_web to read the most promising results
+3. Cross-reference multiple sources — don't rely on a single page
+4. For internal research, combine search_linear + api_fetch (GitHub) + search_code
+5. Write thorough findings — research tasks warrant more detail than action tasks
+6. Save key learnings with save_memory if they'll be useful again
 
 TASK: "${taskText}"${opts.agentPrompt ? `\n\nTASK-SPECIFIC INSTRUCTIONS FROM USER:\n${opts.agentPrompt}` : ""}`;
 }
