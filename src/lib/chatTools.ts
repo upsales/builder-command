@@ -1,11 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { getItems, getProfile, dismissItem, snoozeItem, upsertItem } from "@/lib/items";
 import { getDb, getSetting } from "@/lib/db";
-import { mergePR, enableAutoMerge, addReviewer } from "@/lib/integrations/github";
+import { mergePR, enableAutoMerge, addReviewer, createPR, submitReview, commentOnPR, getPRChecks } from "@/lib/integrations/github";
 import { updateIssueState, updateIssueAssignee } from "@/lib/integrations/linear";
 import { notifyChange } from "@/lib/changeNotifier";
 import { sendReply, addReaction } from "@/lib/integrations/slack";
-import { searchRepo, readRepoFile, listRepoFiles, ensureRepo } from "@/lib/repo-cache";
+import { searchRepo, readRepoFile, listRepoFiles, ensureRepo, getRepoPath } from "@/lib/repo-cache";
 import { browse, click, type as browserType, screenshot } from "@/lib/browser";
 import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { join, resolve, relative } from "path";
@@ -361,6 +361,159 @@ Supported languages: javascript (Node.js), python (Python 3).
       required: ["path", "find", "replace"],
     },
   },
+  // --- Git workflow tools ---
+  {
+    name: "git_create_branch",
+    description: "Create a new git branch on a cloned repo. The repo must be cloned first via clone_repo.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        branch_name: { type: "string", description: "New branch name" },
+        base_branch: { type: "string", description: "Base branch to branch from (default: main)" },
+      },
+      required: ["repo", "branch_name"],
+    },
+  },
+  {
+    name: "git_commit",
+    description: "Stage files and create a commit in a cloned repo.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        message: { type: "string", description: "Commit message" },
+        files: {
+          oneOf: [
+            { type: "string", enum: ["all"], description: "Stage all changes" },
+            { type: "array", items: { type: "string" }, description: "Specific file paths to stage" },
+          ],
+          description: "Files to stage — 'all' or array of paths",
+        },
+      },
+      required: ["repo", "message", "files"],
+    },
+  },
+  {
+    name: "git_push",
+    description: "Push a branch to the remote origin.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        branch_name: { type: "string", description: "Branch to push" },
+      },
+      required: ["repo", "branch_name"],
+    },
+  },
+  {
+    name: "repo_write_file",
+    description: "Write a file directly in a cloned repo's working tree (not the sandbox workspace). Use this when implementing features on a branch.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        path: { type: "string", description: "File path relative to repo root" },
+        content: { type: "string", description: "File content" },
+      },
+      required: ["repo", "path", "content"],
+    },
+  },
+  {
+    name: "repo_edit_file",
+    description: "Find and replace text in a file in a cloned repo's working tree.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        path: { type: "string", description: "File path relative to repo root" },
+        find: { type: "string", description: "Text to find (exact match)" },
+        replace: { type: "string", description: "Text to replace with" },
+      },
+      required: ["repo", "path", "find", "replace"],
+    },
+  },
+  // --- PR lifecycle tools ---
+  {
+    name: "create_pr",
+    description: "Create a GitHub pull request.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        head_branch: { type: "string", description: "Branch with changes" },
+        base_branch: { type: "string", description: "Target branch (default: main)" },
+        title: { type: "string", description: "PR title" },
+        body: { type: "string", description: "PR description" },
+      },
+      required: ["repo", "head_branch", "title", "body"],
+    },
+  },
+  {
+    name: "approve_pr",
+    description: "Approve a GitHub PR by submitting an approving review.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        pr_number: { type: "number", description: "PR number" },
+        body: { type: "string", description: "Optional review comment" },
+      },
+      required: ["repo", "pr_number"],
+    },
+  },
+  {
+    name: "request_changes_pr",
+    description: "Request changes on a GitHub PR.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        pr_number: { type: "number", description: "PR number" },
+        body: { type: "string", description: "What changes are needed" },
+      },
+      required: ["repo", "pr_number", "body"],
+    },
+  },
+  {
+    name: "comment_pr",
+    description: "Leave a comment on a GitHub PR.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        pr_number: { type: "number", description: "PR number" },
+        body: { type: "string", description: "Comment text" },
+      },
+      required: ["repo", "pr_number", "body"],
+    },
+  },
+  {
+    name: "get_pr_checks",
+    description: "Get CI/check status for a GitHub PR. Use with schedule_followup to wait for checks to complete.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        pr_number: { type: "number", description: "PR number" },
+      },
+      required: ["repo", "pr_number"],
+    },
+  },
+  {
+    name: "evaluate_pr_policy",
+    description: `Evaluate a PR against the configured auto-review policy. Returns whether the PR should be auto-approved, flagged for manual review, or auto-rejected based on rules like: max files changed, max lines changed, allowed authors, required CI checks, sensitive file paths.
+
+If no policy is configured, returns a suggestion to set one up.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        pr_number: { type: "number", description: "PR number" },
+      },
+      required: ["repo", "pr_number"],
+    },
+  },
 ];
 
 const WORKSPACE_DIR = join(process.cwd(), "data", "workspace");
@@ -656,6 +809,181 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
         writeFileSync(filePath, updated, "utf-8");
         return `Edited workspace/${input.path} — replaced ${find.length} chars`;
       }
+      // --- Git workflow ---
+      case "git_create_branch": {
+        const repoPath = getRepoPath(input.repo as string);
+        if (!repoPath) return `Error: Repo not cloned. Use clone_repo first.`;
+        const base = (input.base_branch as string) || "main";
+        try {
+          execSync(`git fetch origin ${base}`, { cwd: repoPath, timeout: 30000, stdio: "pipe" });
+        } catch {
+          // Try fetching all if specific branch fails
+          try { execSync("git fetch origin", { cwd: repoPath, timeout: 30000, stdio: "pipe" }); } catch { /* continue */ }
+        }
+        try {
+          execSync(`git checkout -b ${input.branch_name} origin/${base}`, { cwd: repoPath, timeout: 10000, stdio: "pipe" });
+          return `Created and checked out branch '${input.branch_name}' from origin/${base}`;
+        } catch (e) {
+          // Branch may already exist
+          try {
+            execSync(`git checkout ${input.branch_name}`, { cwd: repoPath, timeout: 10000, stdio: "pipe" });
+            return `Checked out existing branch '${input.branch_name}'`;
+          } catch {
+            return `Error creating branch: ${e instanceof Error ? e.message : String(e)}`;
+          }
+        }
+      }
+      case "git_commit": {
+        const repoPath = getRepoPath(input.repo as string);
+        if (!repoPath) return `Error: Repo not cloned. Use clone_repo first.`;
+        const files = input.files;
+        if (files === "all") {
+          execSync("git add -A", { cwd: repoPath, timeout: 10000, stdio: "pipe" });
+        } else if (Array.isArray(files)) {
+          for (const f of files) {
+            execSync(`git add "${f}"`, { cwd: repoPath, timeout: 10000, stdio: "pipe" });
+          }
+        }
+        // Configure git user for commits if not set
+        try { execSync("git config user.email", { cwd: repoPath, timeout: 5000, stdio: "pipe" }); } catch {
+          execSync('git config user.email "agent@builder-command.local"', { cwd: repoPath, timeout: 5000, stdio: "pipe" });
+          execSync('git config user.name "Builder Agent"', { cwd: repoPath, timeout: 5000, stdio: "pipe" });
+        }
+        const result = execSync(`git commit -m "${(input.message as string).replace(/"/g, '\\"')}"`, {
+          cwd: repoPath, timeout: 10000, encoding: "utf-8", stdio: "pipe",
+        });
+        return result.trim();
+      }
+      case "git_push": {
+        const repoPath = getRepoPath(input.repo as string);
+        if (!repoPath) return `Error: Repo not cloned. Use clone_repo first.`;
+        const token = process.env.GITHUB_TOKEN;
+        if (!token) return "Error: GITHUB_TOKEN not set — cannot push.";
+        // Ensure the remote URL uses the token for auth
+        const repo = input.repo as string;
+        const authedUrl = `https://x-access-token:${token}@github.com/${repo}.git`;
+        try {
+          execSync(`git remote set-url origin "${authedUrl}"`, { cwd: repoPath, timeout: 5000, stdio: "pipe" });
+          const result = execSync(`git push -u origin ${input.branch_name}`, {
+            cwd: repoPath, timeout: 60000, encoding: "utf-8", stdio: "pipe",
+          });
+          return `Pushed branch '${input.branch_name}' to origin\n${result}`.trim();
+        } catch (e) {
+          return `Error pushing: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+      case "repo_write_file": {
+        const repoPath = getRepoPath(input.repo as string);
+        if (!repoPath) return `Error: Repo not cloned. Use clone_repo first.`;
+        const filePath = resolve(repoPath, input.path as string);
+        // Prevent path traversal
+        if (!filePath.startsWith(repoPath)) return "Error: Path traversal not allowed.";
+        const dir = filePath.substring(0, filePath.lastIndexOf("/"));
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        writeFileSync(filePath, input.content as string, "utf-8");
+        return `Wrote ${(input.content as string).length} bytes to ${input.repo}/${input.path}`;
+      }
+      case "repo_edit_file": {
+        const repoPath = getRepoPath(input.repo as string);
+        if (!repoPath) return `Error: Repo not cloned. Use clone_repo first.`;
+        const filePath = resolve(repoPath, input.path as string);
+        if (!filePath.startsWith(repoPath)) return "Error: Path traversal not allowed.";
+        if (!existsSync(filePath)) return `Error: File not found — ${input.path}`;
+        const content = readFileSync(filePath, "utf-8");
+        const find = input.find as string;
+        if (!content.includes(find)) return `Error: Text not found in file`;
+        const updated = content.replace(find, input.replace as string);
+        writeFileSync(filePath, updated, "utf-8");
+        return `Edited ${input.repo}/${input.path} — replaced ${find.length} chars`;
+      }
+      // --- PR lifecycle ---
+      case "create_pr": {
+        const result = await createPR(
+          input.repo as string,
+          input.head_branch as string,
+          (input.base_branch as string) || "main",
+          input.title as string,
+          input.body as string,
+        );
+        return result.success ? `Created PR #${result.number}: ${result.url}` : `Error: ${result.message}`;
+      }
+      case "approve_pr": {
+        const result = await submitReview(input.repo as string, input.pr_number as number, "APPROVE", input.body as string);
+        return result.success ? `PR #${input.pr_number} approved.` : `Error: ${result.message}`;
+      }
+      case "request_changes_pr": {
+        const result = await submitReview(input.repo as string, input.pr_number as number, "REQUEST_CHANGES", input.body as string);
+        return result.success ? `Requested changes on PR #${input.pr_number}.` : `Error: ${result.message}`;
+      }
+      case "comment_pr": {
+        const result = await commentOnPR(input.repo as string, input.pr_number as number, input.body as string);
+        return result.success ? `Commented on PR #${input.pr_number}.` : `Error: ${result.message}`;
+      }
+      case "get_pr_checks": {
+        const checks = await getPRChecks(input.repo as string, input.pr_number as number);
+        if (checks.length === 0) return "No checks found for this PR.";
+        const lines = checks.map(c => `${c.conclusion ?? c.status} — ${c.name}`);
+        const allPassed = checks.every(c => c.conclusion === "success" || c.conclusion === "skipped");
+        const pending = checks.some(c => c.status !== "completed");
+        return `${pending ? "⏳ Checks still running" : allPassed ? "✅ All checks passed" : "❌ Some checks failed"}\n\n${lines.join("\n")}`;
+      }
+      case "evaluate_pr_policy": {
+        const db = getDb();
+        const policySetting = db.prepare("SELECT value FROM settings WHERE key = 'auto_review_policy'").get() as { value: string } | undefined;
+        if (!policySetting) {
+          return `No auto-review policy configured. Set one up in Settings → Agent → Auto-Review Policy. Example policy:\n${JSON.stringify({
+            auto_approve: { max_files_changed: 5, max_lines_changed: 100, allowed_authors: ["dependabot", "renovate"], required_checks_pass: true, excluded_paths: [] },
+            flag_for_review: { large_pr_threshold: 500, sensitive_paths: ["migrations/", "*.env*"] },
+          }, null, 2)}`;
+        }
+        try {
+          const policy = JSON.parse(policySetting.value);
+          const [owner, repoName] = (input.repo as string).split("/");
+          const { Octokit } = require("@octokit/rest");
+          const oc = new Octokit({ auth: process.env.GITHUB_TOKEN });
+          const { data: pr } = await oc.pulls.get({ owner, repo: repoName, pull_number: input.pr_number });
+          const { data: files } = await oc.pulls.listFiles({ owner, repo: repoName, pull_number: input.pr_number as number, per_page: 100 });
+          const checks = await getPRChecks(input.repo as string, input.pr_number as number);
+
+          const totalLines = pr.additions + pr.deletions;
+          const filePaths = files.map((f: { filename: string }) => f.filename);
+          const author = pr.user?.login ?? "unknown";
+          const allChecksPassed = checks.every(c => c.conclusion === "success" || c.conclusion === "skipped");
+          const checksComplete = checks.every(c => c.status === "completed");
+
+          const reasons: string[] = [];
+          const flags: string[] = [];
+
+          // Auto-approve checks
+          const ap = policy.auto_approve;
+          if (ap) {
+            if (ap.allowed_authors?.includes(author)) reasons.push(`Author '${author}' is in allowed list`);
+            if (ap.max_files_changed && pr.changed_files > ap.max_files_changed) flags.push(`${pr.changed_files} files changed (max: ${ap.max_files_changed})`);
+            if (ap.max_lines_changed && totalLines > ap.max_lines_changed) flags.push(`${totalLines} lines changed (max: ${ap.max_lines_changed})`);
+            if (ap.required_checks_pass && !checksComplete) flags.push("Checks not yet complete");
+            else if (ap.required_checks_pass && !allChecksPassed) flags.push("Some checks failed");
+            if (ap.excluded_paths?.length) {
+              const excluded = filePaths.filter((fp: string) => ap.excluded_paths.some((ep: string) => fp.includes(ep.replace("*", ""))));
+              if (excluded.length > 0) flags.push(`Touches excluded paths: ${excluded.join(", ")}`);
+            }
+          }
+
+          // Flag checks
+          const fr = policy.flag_for_review;
+          if (fr) {
+            if (fr.large_pr_threshold && totalLines > fr.large_pr_threshold) flags.push(`Large PR: ${totalLines} lines (threshold: ${fr.large_pr_threshold})`);
+            if (fr.sensitive_paths?.length) {
+              const sensitive = filePaths.filter((fp: string) => fr.sensitive_paths.some((sp: string) => fp.includes(sp.replace("*", ""))));
+              if (sensitive.length > 0) flags.push(`Touches sensitive paths: ${sensitive.join(", ")}`);
+            }
+          }
+
+          const decision = flags.length === 0 && reasons.length > 0 ? "APPROVE" : flags.length > 0 ? "FLAG_FOR_REVIEW" : "NO_POLICY_MATCH";
+          return `Decision: ${decision}\n\nPR #${input.pr_number} by ${author}: ${pr.title}\n${pr.changed_files} files, +${pr.additions} -${pr.deletions}\n\n${reasons.length > 0 ? `Approve reasons:\n${reasons.map(r => `  ✅ ${r}`).join("\n")}\n\n` : ""}${flags.length > 0 ? `Flags:\n${flags.map(f => `  ⚠️ ${f}`).join("\n")}` : "No flags."}`;
+        } catch (e) {
+          return `Error evaluating policy: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
       default:
         return `Unknown tool: ${name}`;
     }
@@ -740,7 +1068,7 @@ export function buildSystemPrompt(codeContext?: { repo: string; prNumber?: numbe
   let systemPrompt = `You are a powerful work assistant embedded in "Builder Command". You can see all the user's work items AND take actions on their behalf using tools. Be proactive — if the user asks you to do something, DO it with tools rather than just describing how.
 
 ## Your Capabilities
-You can: dismiss/snooze items, merge PRs, enable auto-merge, request reviewers, change Linear status, assign Linear issues, reply in Slack, react to Slack messages, create/complete todos, search/read code from GitHub repos, browse the web (fetch any URL), browse websites with a real browser via browse_web (renders JavaScript, takes screenshots — use this for SPAs and dashboards), call Linear and GitHub APIs directly with auto-auth via api_fetch, **execute arbitrary code** (JavaScript or Python) via execute_code for data processing/calculations/parsing/anything the other tools don't cover, and **write/edit files** in a workspace directory (data/workspace/) to save outputs, scripts, or reports.
+You can: dismiss/snooze items, merge PRs, enable auto-merge, request reviewers, change Linear status, assign Linear issues, reply in Slack, react to Slack messages, create/complete todos, search/read code from GitHub repos, browse the web (fetch any URL), browse websites with a real browser via browse_web (renders JavaScript, takes screenshots — use this for SPAs and dashboards), call Linear and GitHub APIs directly with auto-auth via api_fetch, **execute arbitrary code** (JavaScript or Python) via execute_code for data processing/calculations/parsing/anything the other tools don't cover, **write/edit files** in a workspace directory (data/workspace/) to save outputs, scripts, or reports, **create git branches, commit, and push code** (git_create_branch, git_commit, git_push), **write/edit files directly in cloned repos** (repo_write_file, repo_edit_file), **create and manage PRs** (create_pr, approve_pr, request_changes_pr, comment_pr, get_pr_checks), and **evaluate PRs against auto-review policies** (evaluate_pr_policy).
 
 ## Current Work Items
 

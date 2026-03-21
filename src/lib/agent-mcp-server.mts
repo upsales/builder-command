@@ -98,6 +98,41 @@ server.tool("edit_file", "Find and replace text in a file in the agent workspace
 server.tool("schedule_followup", "Schedule yourself to wake up later and continue working. Session ends after this call.", { delay: z.enum(["5m", "10m", "15m", "30m", "1h", "2h", "4h"]), instruction: z.string() },
   async (args) => ({ content: [{ type: "text", text: await callTool("schedule_followup", args) }] }));
 
+// --- Git workflow tools ---
+server.tool("git_create_branch", "Create a new git branch on a cloned repo.", { repo: z.string(), branch_name: z.string(), base_branch: z.string().optional() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("git_create_branch", args) }] }));
+
+server.tool("git_commit", "Stage files and create a commit in a cloned repo.", { repo: z.string(), message: z.string(), files: z.union([z.literal("all"), z.array(z.string())]) },
+  async (args) => ({ content: [{ type: "text", text: await callTool("git_commit", args) }] }));
+
+server.tool("git_push", "Push a branch to the remote origin.", { repo: z.string(), branch_name: z.string() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("git_push", args) }] }));
+
+server.tool("repo_write_file", "Write a file directly in a cloned repo's working tree.", { repo: z.string(), path: z.string(), content: z.string() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("repo_write_file", args) }] }));
+
+server.tool("repo_edit_file", "Find and replace text in a file in a cloned repo.", { repo: z.string(), path: z.string(), find: z.string(), replace: z.string() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("repo_edit_file", args) }] }));
+
+// --- PR lifecycle tools ---
+server.tool("create_pr", "Create a GitHub pull request.", { repo: z.string(), head_branch: z.string(), base_branch: z.string().optional(), title: z.string(), body: z.string() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("create_pr", args) }] }));
+
+server.tool("approve_pr", "Approve a GitHub PR by submitting an approving review.", { repo: z.string(), pr_number: z.number(), body: z.string().optional() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("approve_pr", args) }] }));
+
+server.tool("request_changes_pr", "Request changes on a GitHub PR.", { repo: z.string(), pr_number: z.number(), body: z.string() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("request_changes_pr", args) }] }));
+
+server.tool("comment_pr", "Leave a comment on a GitHub PR.", { repo: z.string(), pr_number: z.number(), body: z.string() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("comment_pr", args) }] }));
+
+server.tool("get_pr_checks", "Get CI/check status for a GitHub PR.", { repo: z.string(), pr_number: z.number() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("get_pr_checks", args) }] }));
+
+server.tool("evaluate_pr_policy", "Evaluate a PR against the auto-review policy. Returns approve/flag/no-match.", { repo: z.string(), pr_number: z.number() },
+  async (args) => ({ content: [{ type: "text", text: await callTool("evaluate_pr_policy", args) }] }));
+
 // Start the server
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -258,6 +258,43 @@ export async function fetchRepoIssues(repo: string, state: "open" | "closed" | "
   }
 }
 
+export async function createPR(repo: string, head: string, base: string, title: string, body: string): Promise<{ success: boolean; number?: number; url?: string; message: string }> {
+  const [owner, repoName] = repo.split("/");
+  try {
+    const { data } = await octokit.pulls.create({ owner, repo: repoName, head, base, title, body });
+    return { success: true, number: data.number, url: data.html_url, message: `PR #${data.number} created` };
+  } catch (e) {
+    return { success: false, message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function submitReview(repo: string, prNumber: number, event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT", body?: string): Promise<{ success: boolean; message: string }> {
+  const [owner, repoName] = repo.split("/");
+  try {
+    await octokit.pulls.createReview({ owner, repo: repoName, pull_number: prNumber, event, body: body || undefined });
+    return { success: true, message: `Review submitted: ${event}` };
+  } catch (e) {
+    return { success: false, message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function commentOnPR(repo: string, prNumber: number, body: string): Promise<{ success: boolean; message: string }> {
+  const [owner, repoName] = repo.split("/");
+  try {
+    await octokit.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body });
+    return { success: true, message: "Comment posted" };
+  } catch (e) {
+    return { success: false, message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function getPRChecks(repo: string, prNumber: number): Promise<{ name: string; status: string; conclusion: string | null }[]> {
+  const [owner, repoName] = repo.split("/");
+  const { data: pr } = await octokit.pulls.get({ owner, repo: repoName, pull_number: prNumber });
+  const { data: checkRuns } = await octokit.checks.listForRef({ owner, repo: repoName, ref: pr.head.sha, per_page: 50 });
+  return checkRuns.check_runs.map(c => ({ name: c.name, status: c.status, conclusion: c.conclusion }));
+}
+
 export async function fetchCollaborators(repo: string): Promise<string[]> {
   const [owner, repoName] = repo.split("/");
   try {
