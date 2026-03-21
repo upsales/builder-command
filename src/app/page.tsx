@@ -122,7 +122,7 @@ function parseSlackEmojis(text: string): string {
 function scrollToSourceItem(source: string, sourceId: string) {
   const elementId = `item-${source}-${sourceId}`;
   // Force-open the parent section(s) via custom event
-  const sectionLabel = source === "linear" ? "Linear" : source === "github" ? "GitHub" : source === "slack" ? "Slack" : "Calendar";
+  const sectionLabel = source === "linear" ? "Linear" : source === "github" ? "GitHub" : source === "slack" ? "Slack" : source === "clanker" ? "Clanker" : "Calendar";
   window.dispatchEvent(new CustomEvent("ls-force", { detail: { key: `__cg_${sectionLabel}`, value: true } }));
 
   const highlightEl = (el: HTMLElement) => {
@@ -168,7 +168,7 @@ interface Profile {
 
 interface TodoItem {
   id: string;
-  source: "linear" | "slack" | "github" | "calendar";
+  source: "linear" | "slack" | "github" | "calendar" | "clanker";
   source_id: string;
   title: string;
   url: string | null;
@@ -190,6 +190,7 @@ const SOURCE_STYLE: Record<string, string> = {
   slack: "bg-emerald-500/20 text-emerald-400",
   github: "bg-orange-500/20 text-orange-400",
   calendar: "bg-blue-500/20 text-blue-400",
+  clanker: "bg-amber-500/20 text-amber-400",
 };
 
 // ─── Custom Actions Menu ──────────────────────────────────────
@@ -1490,6 +1491,7 @@ export default function Home() {
   const githubCount = items.filter((i) => i.source === "github").length;
   const slackCount = items.filter((i) => i.source === "slack").length;
   const calendarCount = items.filter((i) => i.source === "calendar").length;
+  const clankerCount = items.filter((i) => i.source === "clanker").length;
 
   return (
     <div className="fixed inset-0 bg-background flex flex-col overflow-hidden">
@@ -2001,7 +2003,7 @@ function formatDate(dateStr: string) {
 interface UrgentSection {
   label: string;
   urgency: number;
-  source: "calendar" | "github" | "linear" | "slack";
+  source: "calendar" | "github" | "linear" | "slack" | "clanker";
   itemIds: Set<string>;
   // For slack: channel names that are urgent
   slackChannels?: Set<string>;
@@ -2267,7 +2269,7 @@ function CalendarTimeline({ items, onDismiss, hiddenCalendars, onToggleCalendar 
 interface AutoTodo {
   id: string;
   text: string;
-  source: "linear" | "github" | "slack" | "calendar";
+  source: "linear" | "github" | "slack" | "calendar" | "clanker";
   sourceItemId: string; // maps to TodoItem.id for dismissing
   url?: string | null;
 }
@@ -3121,6 +3123,12 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
     return true;
   });
 
+  const clankerItems = filteredItems.filter((i) => {
+    if (i.source !== "clanker") return false;
+    if (isItemFocused(i)) return false;
+    return true;
+  });
+
   const [githubGroupBy, setGithubGroupBy] = useLocalStorage<"repo" | "author" | "assignee" | "status">("filter:githubGroupBy", "repo");
   const [githubGroupBy2, setGithubGroupBy2] = useLocalStorage<"none" | "repo" | "author" | "assignee" | "status">("filter:githubGroupBy2", "none");
 
@@ -3264,6 +3272,9 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                       )}
                       {item.source === "slack" && (
                         <SlackMessage item={item} onDismiss={onDismiss} onImageClick={onImageClick} quickReplies={quickReplies} />
+                      )}
+                      {item.source === "clanker" && (
+                        <ClankerCard item={item} onDismiss={onDismiss} />
                       )}
                       {/* Agent tasks linked to this item */}
                       {itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(todo => {
@@ -3538,6 +3549,19 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
             </CollapsibleGroup>
           )}
 
+          {/* Clanker section — active sessions */}
+          {clankerItems.length > 0 && (
+            <CollapsibleGroup label="Clanker" icon={<Zap size={10} className="text-amber-400" />} count={clankerItems.length} defaultOpen>
+              <div className="space-y-1 ml-3 border-l border-border/30 pl-2">
+                {clankerItems.map((item) => (
+                  <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                    <ClankerCard item={item} onDismiss={onDismiss} />
+                  </div>
+                ))}
+              </div>
+            </CollapsibleGroup>
+          )}
+
           {/* Recently Hidden */}
           <div>
             <div className="flex items-center gap-2 text-xs text-muted mb-1 px-1 group/header sticky bg-background z-[5] py-1 relative before:content-[''] before:absolute before:inset-x-0 before:-top-3 before:h-3 before:bg-background" style={{ top: "var(--sticky-top)" }}>
@@ -3560,6 +3584,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                           item.source === "slack" ? "bg-emerald-500/10 text-emerald-400" :
                           item.source === "github" ? "bg-orange-500/10 text-orange-400" :
                           item.source === "linear" ? "bg-violet-500/10 text-violet-400" :
+                          item.source === "clanker" ? "bg-amber-500/10 text-amber-400" :
                           "bg-sky-500/10 text-sky-400"
                         }`}>{item.source}</span>
                         <span className="flex-1 text-[11px] text-muted truncate">{item.title}</span>
@@ -4559,6 +4584,96 @@ function CalendarCard({ item, onDismiss, onChatAbout, isInProgress, onToggleInPr
               <Bot size={10} />
               Chat about this
             </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClankerCard({ item, onDismiss }: { item: TodoItem; onDismiss: (item: TodoItem) => void }) {
+  const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
+  const [fading, setFading] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  const statusColors: Record<string, string> = {
+    queued: "bg-gray-500/20 text-gray-400",
+    running: "bg-amber-500/20 text-amber-400",
+    completed: "bg-green-500/20 text-green-400",
+    failed: "bg-red-500/20 text-red-400",
+    cancelled: "bg-gray-500/20 text-gray-500",
+  };
+
+  const statusIcons: Record<string, string> = {
+    queued: "◷",
+    running: "⚡",
+    completed: "✓",
+    failed: "✗",
+    cancelled: "—",
+  };
+
+  const status = raw.status ?? "queued";
+  const prompt = raw.prompt ?? item.title;
+  const timeAgo = raw.createdAt ? (() => {
+    const diff = Date.now() - new Date(raw.createdAt).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  })() : "";
+
+  return (
+    <div className={`bg-card border border-border rounded-lg hover:bg-card-hover transition-all duration-300 group ${fading ? "opacity-0 max-h-0 py-0 overflow-hidden" : "opacity-100"}`}>
+      <div className="flex items-center gap-3 px-4 py-3 cursor-pointer" onClick={() => setExpanded(!expanded)}>
+        <div className="shrink-0">
+          <span className={`text-xs px-2 py-0.5 rounded font-medium ${statusColors[status] ?? statusColors.queued}`}>
+            {statusIcons[status]} {status}
+          </span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <span className="text-sm block truncate">{prompt}</span>
+          <div className="flex items-center gap-3 mt-0.5">
+            {raw.repo && <span className="text-[11px] text-muted font-mono">{raw.repo}</span>}
+            {raw.branch && <span className="text-[10px] text-muted/60 font-mono truncate max-w-[200px]">{raw.branch}</span>}
+            {timeAgo && <span className="text-[10px] text-muted/50">{timeAgo}</span>}
+            {raw.prUrl && (
+              <a href={raw.prUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="text-[11px] text-accent flex items-center gap-1 hover:underline">
+                <GitPullRequest size={10} /> PR #{raw.prNumber}
+              </a>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
+          {raw.url && (
+            <a href={raw.url} target="_blank" rel="noopener noreferrer" className="text-accent/50 hover:text-accent transition-colors p-1" title="Open in Clanker">
+              <ExternalLink size={14} />
+            </a>
+          )}
+          <SnoozeButton source={item.source} sourceId={item.source_id} onDone={() => onDismiss(item)} size={14} />
+          <button onClick={() => { setFading(true); setTimeout(() => onDismiss(item), 300); }} className="text-red-400/50 hover:text-red-400 transition-colors p-1" title="Dismiss">
+            <X size={14} />
+          </button>
+        </div>
+      </div>
+      {expanded && (
+        <div className="px-4 pb-3 border-t border-border/50 pt-3 text-xs space-y-2">
+          {raw.summary && (
+            <div>
+              <span className="text-muted block mb-1">Summary</span>
+              <div className="text-foreground/80 whitespace-pre-wrap">{raw.summary}</div>
+            </div>
+          )}
+          {raw.prompt && raw.prompt.length > 120 && (
+            <div>
+              <span className="text-muted block mb-1">Full prompt</span>
+              <div className="text-foreground/60 whitespace-pre-wrap">{raw.prompt}</div>
+            </div>
+          )}
+          {raw.url && (
+            <a href={raw.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-[11px] text-accent hover:underline mt-2">
+              <Zap size={10} /> Open session in Clanker
+            </a>
           )}
         </div>
       )}

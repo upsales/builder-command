@@ -622,6 +622,40 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
           .run(id, context.sessionId, runAt, input.instruction);
         return `Scheduled followup at ${runAt}: "${input.instruction}". Your session will end now and resume at that time.`;
       }
+      case "start_clanker_session": {
+        const CLANKER_URL = process.env.CLANKER_URL || "https://clanker.upsales.com";
+        const CLANKER_API_KEY = process.env.CLANKER_API_KEY || "";
+        const clankerHeaders: Record<string, string> = { "Content-Type": "application/json" };
+        if (CLANKER_API_KEY) clankerHeaders["X-API-Key"] = CLANKER_API_KEY;
+
+        const { getProfile } = require("@/lib/items");
+        const profile = getProfile();
+        const body: Record<string, unknown> = {
+          prompt: input.prompt,
+          sessionType: "code",
+          createPrAutomatically: true,
+        };
+        if (input.repo) body.repo = input.repo;
+        if (input.linear_url) body.linearUrl = input.linear_url;
+        if (profile) {
+          body.profileId = profile.slack_user_id || "builder-command";
+          body.profileName = "Builder Command Agent";
+          body.profileEmail = profile.linear_email || undefined;
+        }
+
+        try {
+          const res = await fetch(`${CLANKER_URL}/api/sessions`, {
+            method: "POST",
+            headers: clankerHeaders,
+            body: JSON.stringify(body),
+          });
+          const data = await res.json() as Record<string, unknown>;
+          if (!res.ok) return `Error creating Clanker session: ${data.error || data.message || res.statusText}`;
+          return `Clanker session created successfully!\n- Session ID: ${data.id}\n- URL: ${CLANKER_URL}/session/${data.id}\n- Status: ${data.status ?? "queued"}\nClanker will handle the coding work. You can check the session URL for progress.`;
+        } catch (e) {
+          return `Error connecting to Clanker: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
       case "save_memory": {
         const db = getDb();
         const id = crypto.randomUUID();

@@ -8,7 +8,7 @@ export interface Profile {
 
 export interface TodoItem {
   id: string;
-  source: "linear" | "slack" | "github" | "calendar";
+  source: "linear" | "slack" | "github" | "calendar" | "clanker";
   source_id: string;
   title: string;
   url: string | null;

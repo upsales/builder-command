@@ -26,10 +26,10 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<st
 const server = new McpServer({ name: "bc-tools", version: "1.0.0" });
 
 // Register all tools
-server.tool("dismiss_item", "Dismiss/clear an item from the user's queue.", { source: z.enum(["linear", "github", "slack", "calendar"]), source_id: z.string() },
+server.tool("dismiss_item", "Dismiss/clear an item from the user's queue.", { source: z.enum(["linear", "github", "slack", "calendar", "clanker"]), source_id: z.string() },
   async (args) => ({ content: [{ type: "text", text: await callTool("dismiss_item", args) }] }));
 
-server.tool("snooze_item", "Snooze an item so it reappears later.", { source: z.enum(["linear", "github", "slack", "calendar"]), source_id: z.string(), duration: z.enum(["1h", "2h", "4h", "tomorrow", "next_week"]) },
+server.tool("snooze_item", "Snooze an item so it reappears later.", { source: z.enum(["linear", "github", "slack", "calendar", "clanker"]), source_id: z.string(), duration: z.enum(["1h", "2h", "4h", "tomorrow", "next_week"]) },
   async (args) => ({ content: [{ type: "text", text: await callTool("snooze_item", args) }] }));
 
 server.tool("merge_pr", "Merge a GitHub pull request.", { repo: z.string(), pr_number: z.number() },
@@ -97,6 +97,9 @@ server.tool("edit_file", "Find and replace text in a file in the agent workspace
 
 server.tool("schedule_followup", "Schedule yourself to wake up later and continue working. Session ends after this call.", { delay: z.enum(["5m", "10m", "15m", "30m", "1h", "2h", "4h"]), instruction: z.string() },
   async (args) => ({ content: [{ type: "text", text: await callTool("schedule_followup", args) }] }));
+
+server.tool("start_clanker_session", "Start a Clanker coding session. Use this for implementation work, bug fixes, feature development, and refactoring. Clanker will clone the repo, create a branch, write code, and open a PR. Prefer this over writing code yourself.", { prompt: z.string().describe("The coding task description"), repo: z.string().optional().describe("Repository name (e.g. 'owner/repo')"), linear_url: z.string().optional().describe("Linear issue URL for context") },
+  async (args) => ({ content: [{ type: "text", text: await callTool("start_clanker_session", args) }] }));
 
 // Start the server
 const transport = new StdioServerTransport();
