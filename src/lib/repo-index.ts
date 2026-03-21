@@ -32,6 +32,10 @@ export interface ModuleIndex {
 // Track which repos are currently being indexed
 const indexingRepos = new Set<string>();
 
+// Debounce timers for push-triggered re-indexing
+const reindexTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const REINDEX_DEBOUNCE_MS = 10 * 60 * 1000; // 10 minutes — coalesce rapid pushes
+
 // --- Queries ---
 
 export function getRepoIndex(repo: string): RepoIndex | null {
@@ -287,7 +291,43 @@ Only return valid JSON. No markdown fences.`
   }
 }
 
-/** Trigger indexing in the background. Returns immediately. */
+/** Check if changes since last index are structurally significant (worth re-indexing). */
+function hasStructuralChanges(repoPath: string, lastSha: string): boolean {
+  try {
+    // Get list of changed files since last indexed commit
+    const diff = execSync(`git diff --name-status ${lastSha}..HEAD`, {
+      cwd: repoPath, timeout: 10000, encoding: "utf-8", maxBuffer: 256 * 1024,
+    });
+    if (!diff.trim()) return false;
+
+    const lines = diff.trim().split("\n");
+
+    // Structural signals: new/deleted files, config changes, dependency changes
+    const structuralPatterns = [
+      /^[AD]\t/,                                        // Files added or deleted (new modules, removed modules)
+      /package\.json|Cargo\.toml|go\.mod|requirements\.txt|pyproject\.toml/, // Dependency changes
+      /tsconfig|next\.config|webpack|vite\.config/,     // Build config changes
+      /schema\.(ts|js|prisma|graphql|sql)/,             // Schema changes
+      /\.env\.example|docker-compose|Dockerfile/,       // Infrastructure changes
+      /^R\d*\t/,                                        // Renamed files (restructuring)
+    ];
+
+    let structuralCount = 0;
+    for (const line of lines) {
+      if (structuralPatterns.some(p => p.test(line))) {
+        structuralCount++;
+      }
+    }
+
+    // Re-index if: any structural changes, or if >20 files changed (big refactor)
+    return structuralCount > 0 || lines.length > 20;
+  } catch {
+    // If we can't diff (e.g. shallow clone doesn't have old sha), re-index to be safe
+    return true;
+  }
+}
+
+/** Trigger indexing in the background. Returns immediately. Used for first-time indexing after clone. */
 export function indexRepoBackground(repo: string): void {
   if (indexingRepos.has(repo) || !isRepoReady(repo)) return;
   const existing = getRepoIndex(repo);
@@ -297,6 +337,57 @@ export function indexRepoBackground(repo: string): void {
     if (existing.commit_sha === currentSha) return; // Already up to date
   }
   indexRepo(repo).catch(err => console.error(`[repo-index] Background index failed for ${repo}:`, err));
+}
+
+/**
+ * Schedule a re-index after a push. Debounced (10 min) and only triggers if
+ * the changes are structurally significant (new/deleted files, dependency
+ * changes, config changes, large refactors). Content-only edits are skipped.
+ */
+export function scheduleReindexOnPush(repo: string): void {
+  if (indexingRepos.has(repo) || !isRepoReady(repo)) return;
+
+  // Clear any existing timer — restart the debounce window
+  const existing = reindexTimers.get(repo);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(() => {
+    reindexTimers.delete(repo);
+
+    const repoPath = getRepoPath(repo);
+    const index = getRepoIndex(repo);
+    if (!repoPath || !index?.commit_sha) {
+      // No previous index — do a full index
+      indexRepoBackground(repo);
+      return;
+    }
+
+    // Pull latest before checking
+    try {
+      execSync("git fetch origin --quiet", { cwd: repoPath, timeout: 30000, stdio: "pipe" });
+      execSync("git reset --hard origin/HEAD", { cwd: repoPath, timeout: 10000, stdio: "pipe" });
+    } catch { /* fetch failed, check what we have */ }
+
+    const currentSha = getRepoHeadSha(repoPath);
+    if (currentSha === index.commit_sha) {
+      console.log(`[repo-index] Skipping re-index of ${repo} — no new commits`);
+      return;
+    }
+
+    if (!hasStructuralChanges(repoPath, index.commit_sha)) {
+      console.log(`[repo-index] Skipping re-index of ${repo} — changes are content-only, not structural`);
+      // Update the sha so we don't re-check the same range next time
+      const db = getDb();
+      db.prepare("UPDATE repo_index SET commit_sha = ? WHERE repo = ?").run(currentSha, repo);
+      return;
+    }
+
+    console.log(`[repo-index] Structural changes detected in ${repo}, re-indexing`);
+    indexRepo(repo).catch(err => console.error(`[repo-index] Re-index failed for ${repo}:`, err));
+  }, REINDEX_DEBOUNCE_MS);
+
+  reindexTimers.set(repo, timer);
+  console.log(`[repo-index] Push to ${repo} — scheduled re-index check in ${REINDEX_DEBOUNCE_MS / 1000}s (debounced)`);
 }
 
 /** Query the index for a specific repo — returns a formatted summary for the agent. */

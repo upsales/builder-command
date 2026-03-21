@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getProfile, upsertItem } from "@/lib/items";
-import { indexRepoBackground } from "@/lib/repo-index";
+import { scheduleReindexOnPush } from "@/lib/repo-index";
 import { isRepoReady } from "@/lib/repo-cache";
 
 export async function POST(request: NextRequest) {
@@ -102,11 +102,11 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Re-index repo on push events if we have it cloned
+  // Schedule re-index on push — debounced and only for structural changes
   if (event === "push") {
     const repo = (body.repository as { full_name?: string })?.full_name;
     if (repo && isRepoReady(repo)) {
-      indexRepoBackground(repo);
+      scheduleReindexOnPush(repo);
     }
   }
 
