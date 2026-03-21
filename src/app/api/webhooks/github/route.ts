@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getProfile, upsertItem } from "@/lib/items";
+import { indexRepoBackground } from "@/lib/repo-index";
+import { isRepoReady } from "@/lib/repo-cache";
 
 export async function POST(request: NextRequest) {
   const event = request.headers.get("x-github-event");
@@ -97,6 +99,14 @@ export async function POST(request: NextRequest) {
           checks: [],
         }),
       });
+    }
+  }
+
+  // Re-index repo on push events if we have it cloned
+  if (event === "push") {
+    const repo = (body.repository as { full_name?: string })?.full_name;
+    if (repo && isRepoReady(repo)) {
+      indexRepoBackground(repo);
     }
   }
 

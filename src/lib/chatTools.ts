@@ -6,6 +6,7 @@ import { updateIssueState, updateIssueAssignee } from "@/lib/integrations/linear
 import { notifyChange } from "@/lib/changeNotifier";
 import { sendReply, addReaction } from "@/lib/integrations/slack";
 import { searchRepo, readRepoFile, listRepoFiles, ensureRepo } from "@/lib/repo-cache";
+import { queryRepoIndex, indexRepo, getIndexedReposSummary } from "@/lib/repo-index";
 import { browse, click, type as browserType, screenshot } from "@/lib/browser";
 import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { join, resolve, relative } from "path";
@@ -206,6 +207,30 @@ export const tools: Anthropic.Tool[] = [
   {
     name: "clone_repo",
     description: "Clone or update a GitHub repository for code exploration. Must be called before search_code, read_file, or list_files if the repo hasn't been loaded via PR code context.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+      },
+      required: ["repo"],
+    },
+  },
+  {
+    name: "query_repo_index",
+    description: `Query the persistent codebase index for a repository. Returns deep architectural knowledge — architecture, patterns, key modules, coupling/fragility analysis, and ownership. Much faster than re-exploring code. The index is built automatically when repos are cloned.
+
+Use this BEFORE diving into code search/read when you need to understand a repo's structure, find where something lives, or assess the impact of a change.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+      },
+      required: ["repo"],
+    },
+  },
+  {
+    name: "reindex_repo",
+    description: "Force re-index a repository to update the persistent codebase understanding. Use when the repo has changed significantly or the index seems stale.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -525,7 +550,17 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
       }
       case "clone_repo": {
         ensureRepo(input.repo as string);
-        return `Repository ${input.repo} cloned/updated and ready for code exploration.`;
+        // Trigger indexing in background after clone
+        indexRepo(input.repo as string).catch(() => {});
+        return `Repository ${input.repo} cloned/updated and ready for code exploration. Codebase indexing started in background.`;
+      }
+      case "query_repo_index": {
+        return queryRepoIndex(input.repo as string);
+      }
+      case "reindex_repo": {
+        const result = await indexRepo(input.repo as string);
+        if (!result) return `Failed to index ${input.repo}. Make sure it's cloned first.`;
+        return `Re-indexed ${input.repo}. ${result.summary}`;
       }
       case "web_fetch": {
         const url = input.url as string;
@@ -774,6 +809,13 @@ ${(() => {
   return Array.from(byCategory.entries()).map(([cat, mems]) =>
     `### ${cat}\n${mems.map(m => `- [${m.id}] ${m.content}`).join("\n")}`
   ).join("\n");
+})()}
+
+## Codebase Knowledge (Persistent Index)
+${(() => {
+  const repoKnowledge = getIndexedReposSummary();
+  if (!repoKnowledge) return "No repositories indexed yet. When repos are cloned, they are automatically analyzed and indexed. Use query_repo_index for detailed knowledge about a specific repo.";
+  return repoKnowledge + "\n\nUse query_repo_index for full details on any repo above.";
 })()}
 
 ## User Instructions (Claude.me)

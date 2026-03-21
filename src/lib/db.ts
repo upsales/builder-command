@@ -157,6 +157,39 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_agent_memories_category ON agent_memories(category);
   `);
 
+  // Persistent codebase index — structured understanding of repos
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS repo_index (
+      repo TEXT PRIMARY KEY,
+      summary TEXT NOT NULL,
+      architecture TEXT,
+      patterns TEXT,
+      key_modules TEXT,
+      dependencies TEXT,
+      fragile_areas TEXT,
+      ownership TEXT,
+      indexed_at TEXT DEFAULT (datetime('now')),
+      commit_sha TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+    );
+    CREATE INDEX IF NOT EXISTS idx_repo_index_status ON repo_index(status);
+  `);
+
+  // Granular module-level index entries for detailed queries
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS repo_index_modules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repo TEXT NOT NULL,
+      module_path TEXT NOT NULL,
+      description TEXT NOT NULL,
+      exports TEXT,
+      dependencies TEXT,
+      coupling_notes TEXT,
+      UNIQUE(repo, module_path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_repo_index_modules_repo ON repo_index_modules(repo);
+  `);
+
   // Scheduled followups — agent can schedule itself to wake up later
   db.exec(`
     CREATE TABLE IF NOT EXISTS scheduled_followups (

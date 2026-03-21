@@ -4,6 +4,7 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import { getSetting, setSetting } from "./db";
+import { indexRepoBackground } from "./repo-index";
 
 const execAsync = promisify(exec);
 
@@ -139,6 +140,8 @@ export function cloneRepoBackground(repo: string): void {
     cloningRepos.delete(repo);
     readyRepos.add(repo);
     console.log(`[repo-cache] Finished cloning ${repo}`);
+    // Auto-index the repo in the background
+    indexRepoBackground(repo);
   }).catch((err) => {
     cloningRepos.delete(repo);
     console.error(`[repo-cache] Failed to clone ${repo}:`, err.message);
