@@ -387,6 +387,27 @@ function SnoozeButton({ source, sourceId, onDone, size = 12 }: { source: string;
   );
 }
 
+// ─── Prediction Badge ────────────────────────────────────────
+function PredictionBadge({ prediction }: { prediction?: { predicted_action: string; confidence: number; reason: string } }) {
+  if (!prediction || prediction.confidence < 0.5) return null;
+  const colors = {
+    dismiss: "bg-red-500/10 text-red-400 border-red-500/20",
+    snooze: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
+    focus: "bg-sky-500/10 text-sky-400 border-sky-500/20",
+    act: "bg-green-500/10 text-green-400 border-green-500/20",
+  };
+  const labels = { dismiss: "Skip", snooze: "Snooze", focus: "Focus", act: "Act" };
+  const color = colors[prediction.predicted_action as keyof typeof colors] ?? "bg-muted/10 text-muted border-border";
+  const label = labels[prediction.predicted_action as keyof typeof labels] ?? prediction.predicted_action;
+  return (
+    <div className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] border ${color}`} title={prediction.reason}>
+      <Sparkles size={8} />
+      <span>{label}</span>
+      <span className="opacity-50">{Math.round(prediction.confidence * 100)}%</span>
+    </div>
+  );
+}
+
 // ─── Chat Panel ───────────────────────────────────────────────
 interface ChatMessage {
   role: "user" | "assistant";
@@ -2877,7 +2898,20 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
   const [fadingOutKey, setFadingOutKey] = useState<string | null>(null);
   const toggleFocus = useCallback((item: TodoItem) => {
     const key = `${item.source}:${item.source_id}`;
-    if (focusedKeys.has(key)) {
+    const isFocused = focusedKeys.has(key);
+    // Log focus/unfocus behavior
+    fetch("/api/behavior", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: isFocused ? "unfocus" : "focus",
+        source: item.source,
+        source_id: item.source_id,
+        item_title: item.title,
+        item_context: (() => { try { const r = JSON.parse(item.raw_data ?? "{}"); return { source: item.source, ...(item.source === "github" ? { author: r.author, repo: r.repo } : item.source === "slack" ? { channel: r.channelName, sender: r.senderName } : item.source === "linear" ? { state: r.state, priority: r.priority } : {}) }; } catch { return { source: item.source }; } })(),
+      }),
+    }).catch(() => {});
+    if (isFocused) {
       setFocusedKeysArr(prev => prev.filter(k => k !== key));
     } else {
       setFadingOutKey(key);
@@ -2955,6 +2989,47 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
   const [standupText, setStandupText] = useState("");
   const [standupLoading, setStandupLoading] = useState(false);
   const standupRef = useRef("");
+
+  // Behavior learning
+  const [behaviorStats, setBehaviorStats] = useState<{ total: number; byAction: Record<string, number>; bySource: Record<string, number>; since: string | null } | null>(null);
+  const [learnedPatterns, setLearnedPatterns] = useState<{ id: string; pattern: string; category: string; confidence: number; evidence_count: number }[]>([]);
+  const [predictions, setPredictions] = useState<{ source: string; source_id: string; predicted_action: string; confidence: number; reason: string }[]>([]);
+  const [analyzingBehavior, setAnalyzingBehavior] = useState(false);
+  const [predictingBehavior, setPredictingBehavior] = useState(false);
+
+  // Load behavior stats on mount
+  useEffect(() => {
+    fetch("/api/behavior").then(r => r.json()).then(data => {
+      setBehaviorStats(data.stats);
+      setLearnedPatterns(data.patterns ?? []);
+    }).catch(() => {});
+  }, []);
+
+  const handleAnalyzeBehavior = async () => {
+    setAnalyzingBehavior(true);
+    try {
+      const res = await fetch("/api/behavior/analyze", { method: "POST" });
+      const data = await res.json();
+      if (data.patterns) setLearnedPatterns(data.patterns);
+      if (data.stats) setBehaviorStats(data.stats);
+    } finally {
+      setAnalyzingBehavior(false);
+    }
+  };
+
+  const handlePredictBehavior = async () => {
+    setPredictingBehavior(true);
+    try {
+      const res = await fetch("/api/behavior/predict", { method: "POST" });
+      const data = await res.json();
+      if (data.predictions) setPredictions(data.predictions);
+    } finally {
+      setPredictingBehavior(false);
+    }
+  };
+
+  // Build prediction lookup map
+  const predictionMap = new Map(predictions.map(p => [`${p.source}:${p.source_id}`, p]));
 
   const handlePrioritize = async () => {
     setAiPrioritizing(true);
@@ -3458,14 +3533,16 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                         return (<div className="ml-3 border-l border-border/30 pl-2 space-y-1">{Array.from(subGrouped.entries()).map(([subGroup, subItems]) => (
                           <CollapsibleGroup key={subGroup} label={subGroup} count={subItems.length} mono={githubGroupBy2 === "repo"} defaultOpen stickyOffset={3}>
                             {subItems.map((item) => (
-                              <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                              <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 relative ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
                                 <GithubCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
                               </div>
                             ))}
                           </CollapsibleGroup>
                         ))}</div>);
                       })() : groupItems.map((item) => (
-                        <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                        <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 relative ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
                           <GithubCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
                         </div>
                       ))}
@@ -3520,14 +3597,16 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                         return (<div className="ml-3 border-l border-border/30 pl-2 space-y-1">{Array.from(subGrouped.entries()).map(([subGroup, subItems]) => (
                           <CollapsibleGroup key={subGroup} label={subGroup} count={subItems.length} defaultOpen stickyOffset={3}>
                             {subItems.map((item) => (
-                              <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                              <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 relative ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
                                 <LinearCard item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
                               </div>
                             ))}
                           </CollapsibleGroup>
                         ))}</div>);
                       })() : groupItems.map((item) => (
-                        <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                        <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 relative ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
                           <LinearCard item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
                         </div>
                       ))}
@@ -3737,6 +3816,62 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
             </div>
           );
         })()}
+
+        {/* Behavior Learning */}
+        <div className="border-t border-border pt-3 mt-2">
+          <h4 className="text-[10px] uppercase tracking-wider text-muted font-semibold mb-2 flex items-center gap-1">
+            <Sparkles size={10} className="text-amber-400" />
+            Learning
+          </h4>
+          {behaviorStats && (
+            <div className="text-[10px] text-muted/70 mb-2 space-y-0.5">
+              <div>{behaviorStats.total} decisions tracked</div>
+              {behaviorStats.since && <div className="text-[9px]">Since {new Date(behaviorStats.since).toLocaleDateString()}</div>}
+            </div>
+          )}
+          <div className="flex flex-col gap-1.5">
+            <button
+              onClick={handleAnalyzeBehavior}
+              disabled={analyzingBehavior}
+              className="w-full px-2 py-1.5 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1"
+            >
+              {analyzingBehavior ? <><Loader2 size={10} className="animate-spin" /> Analyzing...</> : "Analyze Patterns"}
+            </button>
+            {learnedPatterns.length > 0 && (
+              <button
+                onClick={handlePredictBehavior}
+                disabled={predictingBehavior}
+                className="w-full px-2 py-1.5 rounded text-[10px] bg-sky-500/10 text-sky-400 border border-sky-500/20 hover:bg-sky-500/20 transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1"
+              >
+                {predictingBehavior ? <><Loader2 size={10} className="animate-spin" /> Predicting...</> : "Predict Actions"}
+              </button>
+            )}
+          </div>
+          {learnedPatterns.length > 0 && (
+            <div className="mt-2 space-y-1.5">
+              <div className="text-[10px] text-muted/50">{learnedPatterns.length} patterns learned</div>
+              {learnedPatterns.slice(0, 5).map((p, i) => (
+                <div key={i} className="text-[10px] p-1.5 rounded bg-card border border-border">
+                  <div className="text-foreground/80 leading-tight">{p.pattern}</div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className={`px-1 py-0.5 rounded text-[8px] ${
+                      p.confidence >= 0.8 ? "bg-green-500/10 text-green-400" :
+                      p.confidence >= 0.5 ? "bg-amber-500/10 text-amber-400" :
+                      "bg-muted/10 text-muted"
+                    }`}>
+                      {Math.round(p.confidence * 100)}%
+                    </span>
+                    <span className="text-muted/40">{p.evidence_count} examples</span>
+                    <span className="text-muted/30 capitalize">{p.category}</span>
+                  </div>
+                </div>
+              ))}
+              {learnedPatterns.length > 5 && (
+                <div className="text-[9px] text-muted/40 text-center">+{learnedPatterns.length - 5} more</div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
       </div>
     </div>

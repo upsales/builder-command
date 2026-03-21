@@ -10,6 +10,7 @@ import { browse, click, type as browserType, screenshot } from "@/lib/browser";
 import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { join, resolve, relative } from "path";
 import { execSync, execFile } from "child_process";
+import { logBehavior } from "@/lib/behavior";
 
 const SELF_REPO_PATH = process.cwd();
 
@@ -435,9 +436,9 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
       case "merge_pr": {
         const result = await mergePR(input.repo as string, input.pr_number as number);
         if (result.success) {
-          // Dismiss both possible source_id formats (review- and pr-) since the PR is now merged
           const repo = input.repo as string;
           const prNum = input.pr_number as number;
+          logBehavior("merge_pr", "github", `pr-${repo}-${prNum}`, `PR #${prNum} in ${repo}`, { source: "github", repo });
           dismissItem("github", `pr-${repo}-${prNum}`);
           dismissItem("github", `review-${repo}-${prNum}`);
           notifyChange();
@@ -465,6 +466,7 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
       case "reply_slack": {
         const profile = getProfile();
         if (!profile?.slack_token) return "Error: Slack not connected";
+        logBehavior("reply_slack", "slack", input.channel as string, `Reply in ${input.channel}`, { source: "slack", channel: input.channel });
         await sendReply(profile.slack_token, input.channel as string, input.text as string, input.thread_ts as string);
         return `Sent Slack reply.`;
       }

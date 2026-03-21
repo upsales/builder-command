@@ -171,6 +171,38 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_scheduled_followups_status ON scheduled_followups(status);
   `);
 
+  // Behavior log — records every user decision for pattern learning
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS behavior_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      action TEXT NOT NULL,
+      source TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      item_title TEXT,
+      item_context TEXT,
+      metadata TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_behavior_log_action ON behavior_log(action);
+    CREATE INDEX IF NOT EXISTS idx_behavior_log_source ON behavior_log(source);
+    CREATE INDEX IF NOT EXISTS idx_behavior_log_created ON behavior_log(created_at);
+  `);
+
+  // Learned patterns — extracted behavioral rules with confidence
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS learned_patterns (
+      id TEXT PRIMARY KEY,
+      pattern TEXT NOT NULL,
+      category TEXT NOT NULL,
+      confidence REAL NOT NULL DEFAULT 0.5,
+      evidence_count INTEGER NOT NULL DEFAULT 0,
+      last_evidence_at TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_learned_patterns_category ON learned_patterns(category);
+    CREATE INDEX IF NOT EXISTS idx_learned_patterns_confidence ON learned_patterns(confidence);
+  `);
+
   // Add columns to existing tables
   try { db.exec("ALTER TABLE profile ADD COLUMN google_refresh_token TEXT"); } catch { /* already exists */ }
   try { db.exec("ALTER TABLE daily_todos ADD COLUMN deadline TEXT"); } catch { /* already exists */ }
