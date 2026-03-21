@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getItems, getProfile, dismissItem, snoozeItem, upsertItem } from "@/lib/items";
 import { getDb, getSetting } from "@/lib/db";
 import { mergePR, enableAutoMerge, addReviewer, submitPRReview, commentOnPR, fetchPRDiff, fetchPRDetails } from "@/lib/integrations/github";
-import { updateIssueState, updateIssueAssignee } from "@/lib/integrations/linear";
+import { updateIssueState, updateIssueAssignee, createIssue, addIssueComment, searchIssues } from "@/lib/integrations/linear";
 import { notifyChange } from "@/lib/changeNotifier";
 import { sendReply, addReaction } from "@/lib/integrations/slack";
 import { searchRepo, readRepoFile, listRepoFiles, ensureRepo } from "@/lib/repo-cache";
@@ -440,6 +440,63 @@ Examples:
         limit: { type: "number", description: "Max results (default: 10, max: 50)" },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "create_linear_issue",
+    description: "Create a new Linear issue. Use when the user wants to create a ticket, report a bug, or track new work.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Issue title" },
+        description: { type: "string", description: "Issue description (supports markdown)" },
+        priority: { type: "number", description: "Priority: 0=None, 1=Urgent, 2=High, 3=Medium, 4=Low" },
+        assignee_id: { type: "string", description: "Linear user ID to assign (optional)" },
+        state_id: { type: "string", description: "Linear state ID (optional, defaults to team default)" },
+        parent_id: { type: "string", description: "Parent issue ID to create as sub-issue (optional)" },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "add_linear_comment",
+    description: "Add a comment to a Linear issue. Use for status updates, questions, or notes on tickets.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        issue_id: { type: "string", description: "Linear issue ID (UUID)" },
+        body: { type: "string", description: "Comment text (supports markdown)" },
+      },
+      required: ["issue_id", "body"],
+    },
+  },
+  {
+    name: "find_duplicate_issues",
+    description: `Find potential duplicate Linear issues. Searches by title similarity and returns candidates. Use when triaging new tickets, cleaning up the backlog, or checking if an issue already exists before creating one.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title or keywords to find duplicates for" },
+        issue_id: { type: "string", description: "If provided, exclude this issue from results (to avoid self-match)" },
+        limit: { type: "number", description: "Max results (default: 10)" },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "run_tests",
+    description: `Run tests in a cloned GitHub repository. Clones/updates the repo, detects the test framework, and runs the test suite. Returns test output (pass/fail, errors). Use for validating PRs, checking if changes break anything, or verifying implementations.
+
+Supports: npm test, yarn test, pytest, go test, cargo test, and custom commands.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repository in owner/name format" },
+        command: { type: "string", description: "Custom test command (optional — auto-detects if not provided)" },
+        branch: { type: "string", description: "Branch or PR ref to test (optional, defaults to default branch)" },
+        install_deps: { type: "boolean", description: "Whether to install dependencies first (default: true)" },
+      },
+      required: ["repo"],
     },
   },
   {
