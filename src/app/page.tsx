@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from "react";
-import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, AlertCircle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, Zap, Plus, Trash2, Square, CheckSquare, Play, Pause, EyeOff, Search, Wrench } from "lucide-react";
+import { RefreshCw, ExternalLink, Loader2, GitPullRequest, CircleDot, User, Calendar, Tag, ChevronDown, ChevronRight, ChevronLeft, AlertTriangle, AlertCircle, XCircle, CheckCircle, MessageSquare, Send, Hash, X, Clock, MapPin, Video, Users, Bot, ArrowUp, Sparkles, PanelLeftClose, PanelLeft, Settings, Zap, Plus, Trash2, Square, CheckSquare, Play, Pause, Eye, EyeOff, Search, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -199,7 +199,7 @@ interface CustomAction {
   name: string;
   emoji: string;
   prompt: string;
-  source: "linear" | "github" | "both";
+  source: "linear" | "github" | "clanker" | "both";
   repo?: string; // optional repo filter (e.g. "owner/repo")
   createTask?: boolean; // if true, creates a todo + triggers agent instead of chat
 }
@@ -210,7 +210,7 @@ const DEFAULT_ACTIONS: CustomAction[] = [
 ];
 
 function CustomActionsMenu({ source, context, onAction, onAgentAction, onCreateTaskAction, size = 12 }: {
-  source: "linear" | "github";
+  source: "linear" | "github" | "clanker";
   context: Record<string, string>;
   onAction: (prompt: string) => void;
   onAgentAction?: (prompt: string) => void;
@@ -223,7 +223,7 @@ function CustomActionsMenu({ source, context, onAction, onAgentAction, onCreateT
   const [newName, setNewName] = useState("");
   const [newEmoji, setNewEmoji] = useState("⚡");
   const [newPrompt, setNewPrompt] = useState("");
-  const [newSource, setNewSource] = useState<"linear" | "github" | "both">("both");
+  const [newSource, setNewSource] = useState<"linear" | "github" | "clanker" | "both">("both");
   const [newRepo, setNewRepo] = useState("");
   const [newCreateTask, setNewCreateTask] = useState(false);
 
@@ -307,10 +307,11 @@ function CustomActionsMenu({ source, context, onAction, onAgentAction, onCreateT
                 </div>
                 <textarea value={newPrompt} onChange={(e) => setNewPrompt(e.target.value)} className="w-full bg-background border border-border rounded px-2 py-1 text-xs h-32 resize-none" placeholder="Prompt template... Use {title}, {identifier}, {description}, {repo}" />
                 <div className="flex gap-1">
-                  <select value={newSource} onChange={(e) => setNewSource(e.target.value as "linear" | "github" | "both")} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs">
-                    <option value="both">Both</option>
+                  <select value={newSource} onChange={(e) => setNewSource(e.target.value as "linear" | "github" | "clanker" | "both")} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs">
+                    <option value="both">All</option>
                     <option value="linear">Linear</option>
                     <option value="github">GitHub</option>
+                    <option value="clanker">Clanker</option>
                   </select>
                   <input value={newRepo} onChange={(e) => setNewRepo(e.target.value)} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs" placeholder="Repo (optional)" />
                 </div>
@@ -1739,7 +1740,7 @@ function CustomActionsSettings() {
   const [actions, setActions] = useLocalStorage<CustomAction[]>("ui:customActions", DEFAULT_ACTIONS);
   const [adding, setAdding] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
-  const [form, setForm] = useState({ name: "", emoji: "⚡", prompt: "", source: "both" as "linear" | "github" | "both", repo: "", createTask: false });
+  const [form, setForm] = useState({ name: "", emoji: "⚡", prompt: "", source: "both" as "linear" | "github" | "clanker" | "both", repo: "", createTask: false });
 
   const startEdit = (a: CustomAction) => {
     setEditId(a.id);
@@ -1794,7 +1795,7 @@ function CustomActionsSettings() {
 }
 
 function ActionForm({ form, setForm, onSave, onCancel }: {
-  form: { name: string; emoji: string; prompt: string; source: "linear" | "github" | "both"; repo: string; createTask: boolean };
+  form: { name: string; emoji: string; prompt: string; source: "linear" | "github" | "clanker" | "both"; repo: string; createTask: boolean };
   setForm: (f: typeof form) => void;
   onSave: () => void;
   onCancel: () => void;
@@ -1807,10 +1808,11 @@ function ActionForm({ form, setForm, onSave, onCancel }: {
       </div>
       <textarea value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })} className="w-full bg-card border border-border rounded px-2 py-1 text-xs h-32 resize-none font-mono" placeholder="Prompt template..." />
       <div className="flex gap-1">
-        <select value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value as "linear" | "github" | "both" })} className="flex-1 bg-card border border-border rounded px-2 py-0.5 text-xs">
-          <option value="both">Both</option>
+        <select value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value as "linear" | "github" | "clanker" | "both" })} className="flex-1 bg-card border border-border rounded px-2 py-0.5 text-xs">
+          <option value="both">All</option>
           <option value="linear">Linear only</option>
           <option value="github">GitHub only</option>
+          <option value="clanker">Clanker only</option>
         </select>
         <input value={form.repo} onChange={(e) => setForm({ ...form, repo: e.target.value })} className="flex-1 bg-card border border-border rounded px-2 py-0.5 text-xs font-mono" placeholder="Repo filter (optional)" />
       </div>
@@ -3240,9 +3242,13 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
     return true;
   });
 
+  const [hiddenClankerStatusesArr, setHiddenClankerStatusesArr] = useLocalStorage<string[]>("filter:hiddenClankerStatuses", ["completed", "cancelled", "failed", "aborted", "stale"]);
+  const hiddenClankerStatuses = new Set(hiddenClankerStatusesArr);
   const clankerItems = filteredItems.filter((i) => {
     if (i.source !== "clanker") return false;
     if (isItemFocused(i)) return false;
+    const raw = i.raw_data ? JSON.parse(i.raw_data) : {};
+    if (hiddenClankerStatuses.has(raw.status)) return false;
     return true;
   });
 
@@ -3391,7 +3397,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                         <SlackMessage item={item} onDismiss={onDismiss} onImageClick={onImageClick} quickReplies={quickReplies} />
                       )}
                       {item.source === "clanker" && (
-                        <ClankerCard item={item} onDismiss={onDismiss} />
+                        <ClankerCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} />
                       )}
                       {/* Agent tasks linked to this item */}
                       {itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(todo => {
@@ -3441,24 +3447,45 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                     const isRunning = session.status === "running";
                     const parentItem = todo.source && todo.source_id ? items.find(i => i.source === todo.source && i.source_id === todo.source_id) : null;
                     const toggleRef = { current: null } as React.MutableRefObject<(() => void) | null>;
+                    // Use parent item title if available, otherwise fall back to todo text
+                    const displayTitle = parentItem?.title || todo.text;
+                    const sourceLabel = todo.source === "linear" ? "Linear" : todo.source === "github" ? "PR" : todo.source || "";
+                    // Extract action name+emoji from todo text (e.g. "🧐 Review: pr-upsales/..." → emoji="🧐", actionName="Review")
+                    const actionMatch = todo.text.match(/^(\p{Emoji_Presentation}|\p{Emoji}\uFE0F?)\s*([^:]+?):\s/u);
+                    const actionEmoji = actionMatch?.[1] || null;
+                    const actionName = actionMatch?.[2]?.trim() || null;
                     return (
-                      <div key={todo.id} onClick={() => toggleRef.current?.()} className={`border rounded-lg p-2.5 cursor-pointer hover:brightness-110 transition-all ${isRunning ? "bg-purple-500/5 border-purple-500/20" : isFailed ? "bg-red-500/5 border-red-500/20" : isIncomplete ? "bg-amber-500/5 border-amber-500/20" : "bg-green-500/5 border-green-500/20"}`}>
+                      <div key={todo.id} onClick={() => toggleRef.current?.()} className={`border rounded-lg p-3 cursor-pointer hover:brightness-110 transition-all ${isRunning ? "bg-purple-500/5 border-purple-500/20" : isFailed ? "bg-red-500/5 border-red-500/20" : isIncomplete ? "bg-amber-500/5 border-amber-500/20" : "bg-green-500/5 border-green-500/20"}`}>
+                        {/* Header: source badge + action badge + status */}
+                        <div className="flex items-center gap-2 mb-1.5">
+                          {parentItem ? (
+                            <button onClick={(e) => { e.stopPropagation(); scrollToSourceItem(parentItem.source, parentItem.source_id); }} className={`text-[10px] shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded-full hover:underline ${todo.source === "linear" ? "bg-violet-500/15 text-violet-400" : "bg-orange-500/15 text-orange-400"}`}>
+                              {todo.source === "linear" ? <CircleDot size={10} /> : <GitPullRequest size={10} />}
+                              {sourceLabel} {todo.source_id}
+                            </button>
+                          ) : (
+                            <span className="text-[10px] text-purple-400 flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-purple-500/15">
+                              <Bot size={10} /> Agent task
+                            </span>
+                          )}
+                          {actionName && (
+                            <span className="text-[10px] text-purple-300 flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-purple-500/10" data-tooltip={todo.text}>
+                              {actionEmoji && <span>{actionEmoji}</span>} {actionName}
+                            </span>
+                          )}
+                          <span className="flex-1" />
+                          {isRunning ? <span className="text-[10px] text-purple-400 flex items-center gap-1"><Loader2 size={10} className="animate-spin" /> Running</span>
+                            : isFailed ? <span className="text-[10px] text-red-400 flex items-center gap-1"><XCircle size={10} /> Failed</span>
+                            : isIncomplete ? <span className="text-[10px] text-amber-400 flex items-center gap-1"><AlertCircle size={10} /> Incomplete</span>
+                            : <span className="text-[10px] text-green-400 flex items-center gap-1"><CheckCircle size={10} /> Done</span>}
+                        </div>
+                        {/* Title */}
                         <div className="flex items-center gap-2">
                           <button onClick={(e) => { e.stopPropagation(); (async () => { await fetch("/api/todos", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: todo.id, done: true }) }); onRefreshTodos(); })(); }} className="shrink-0 text-muted/40 hover:text-green-400 transition-colors" title="Mark as done"><Square size={14} /></button>
-                          <span className="flex-1 text-xs font-medium truncate">{todo.text}</span>
-                          {parentItem && (
-                            <button onClick={(e) => { e.stopPropagation(); scrollToSourceItem(parentItem.source, parentItem.source_id); }} className={`text-[9px] shrink-0 flex items-center gap-0.5 hover:underline ${todo.source === "linear" ? "text-violet-400/60 hover:text-violet-400" : "text-orange-400/60 hover:text-orange-400"}`}>
-                              {todo.source === "linear" ? <CircleDot size={8} /> : <GitPullRequest size={8} />}
-                              {todo.source_id}
-                            </button>
-                          )}
-                          {isRunning ? <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Loader2 size={9} className="animate-spin" /> Running</span>
-                            : isFailed ? <span className="text-[9px] text-red-400 flex items-center gap-0.5"><XCircle size={9} /> Failed</span>
-                            : isIncomplete ? <span className="text-[9px] text-amber-400 flex items-center gap-0.5"><AlertCircle size={9} /> Incomplete</span>
-                            : <span className="text-[9px] text-green-400 flex items-center gap-0.5"><CheckCircle size={9} /> Done</span>}
+                          <span className="flex-1 text-sm font-medium truncate">{displayTitle}</span>
                         </div>
                         <div onClick={(e) => e.stopPropagation()}>
-                          <AgentSessionInline session={session} onOpenChat={onOpenAgentSession} onRefresh={onRefreshTodos} toggleRef={toggleRef} />
+                          <AgentSessionInline session={session} onOpenChat={onOpenAgentSession} onRefresh={onRefreshTodos} toggleRef={toggleRef} hidePrompt />
                         </div>
                       </div>
                     );
@@ -3676,7 +3703,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
               <div className="space-y-1 ml-3 border-l border-border/30 pl-2">
                 {clankerItems.map((item) => (
                   <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
-                    <ClankerCard item={item} onDismiss={onDismiss} />
+                    <ClankerCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} />
                   </div>
                 ))}
               </div>
@@ -3877,6 +3904,42 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                     }`}
                   >
                     {name} <span className="opacity-50">{count}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Clanker status filters */}
+        {(() => {
+          const statuses = new Set<string>();
+          items.filter(i => i.source === "clanker").forEach(i => {
+            const raw = i.raw_data ? JSON.parse(i.raw_data) : {};
+            if (raw.status) statuses.add(raw.status);
+          });
+          if (statuses.size === 0) return null;
+          const order = ["queued", "running", "waiting", "parked", "completed", "failed", "aborted", "cancelled", "stale"];
+          const sorted = order.filter(s => statuses.has(s));
+          return (
+            <div>
+              <h5 className="text-[10px] text-muted mb-1">Clanker Status</h5>
+              <div className="flex flex-wrap gap-1">
+                {sorted.map(status => (
+                  <button
+                    key={status}
+                    onClick={() => setHiddenClankerStatusesArr(prev => {
+                      const s = new Set(prev);
+                      if (s.has(status)) s.delete(status); else s.add(status);
+                      return [...s];
+                    })}
+                    className={`px-1.5 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
+                      hiddenClankerStatuses.has(status)
+                        ? "bg-card text-muted/30 line-through"
+                        : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                    }`}
+                  >
+                    {status}
                   </button>
                 ))}
               </div>
@@ -4768,25 +4831,32 @@ function CalendarCard({ item, onDismiss, onChatAbout, isInProgress, onToggleInPr
   );
 }
 
-function ClankerCard({ item, onDismiss }: { item: TodoItem; onDismiss: (item: TodoItem) => void }) {
+function ClankerCard({ item, onDismiss, onChatAbout, onAgentAction, onCreateTaskAction }: { item: TodoItem; onDismiss: (item: TodoItem) => void; onChatAbout?: () => void; onAgentAction?: (prompt: string) => void; onCreateTaskAction?: (taskText: string, agentPrompt: string) => void }) {
   const raw = item.raw_data ? JSON.parse(item.raw_data) : {};
   const [fading, setFading] = useState(false);
-  const [expanded, setExpanded] = useState(false);
 
   const statusColors: Record<string, string> = {
     queued: "bg-gray-500/20 text-gray-400",
-    running: "bg-amber-500/20 text-amber-400",
+    running: "bg-purple-500/20 text-purple-400",
+    waiting: "bg-blue-500/20 text-blue-400",
     completed: "bg-green-500/20 text-green-400",
     failed: "bg-red-500/20 text-red-400",
     cancelled: "bg-gray-500/20 text-gray-500",
+    aborted: "bg-gray-500/20 text-gray-500",
+    stale: "bg-yellow-500/20 text-yellow-400",
+    parked: "bg-cyan-500/20 text-cyan-400",
   };
 
   const statusIcons: Record<string, string> = {
     queued: "◷",
     running: "⚡",
+    waiting: "⏸",
     completed: "✓",
     failed: "✗",
     cancelled: "—",
+    aborted: "—",
+    stale: "⚠",
+    parked: "⏸",
   };
 
   const status = raw.status ?? "queued";
@@ -4800,60 +4870,86 @@ function ClankerCard({ item, onDismiss }: { item: TodoItem; onDismiss: (item: To
     return `${Math.floor(hours / 24)}d ago`;
   })() : "";
 
+  const testingColors: Record<string, string> = {
+    untested: "text-gray-400 bg-gray-500/15",
+    verified: "text-green-400 bg-green-500/15",
+    failed: "text-red-400 bg-red-500/15",
+  };
+
   return (
     <div className={`bg-card border border-border rounded-lg hover:bg-card-hover transition-all duration-300 group ${fading ? "opacity-0 max-h-0 py-0 overflow-hidden" : "opacity-100"}`}>
-      <div className="flex items-center gap-3 px-4 py-3 cursor-pointer" onClick={() => setExpanded(!expanded)}>
+      <div className="flex items-center gap-3 px-4 py-3">
         <div className="shrink-0">
           <span className={`text-xs px-2 py-0.5 rounded font-medium ${statusColors[status] ?? statusColors.queued}`}>
             {statusIcons[status]} {status}
           </span>
         </div>
         <div className="flex-1 min-w-0">
-          <span className="text-sm block truncate">{prompt}</span>
-          <div className="flex items-center gap-3 mt-0.5">
+          <a href={raw.url || item.url} target="_blank" rel="noopener noreferrer" className="text-sm block truncate hover:underline">{prompt}</a>
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
             {raw.repo && <span className="text-[11px] text-muted font-mono">{raw.repo}</span>}
-            {raw.branch && <span className="text-[10px] text-muted/60 font-mono truncate max-w-[200px]">{raw.branch}</span>}
+            {raw.sessionSubtype && (
+              <span className="text-[10px] text-muted/70 px-1.5 py-0.5 rounded bg-muted/10">{raw.sessionSubtype}</span>
+            )}
             {timeAgo && <span className="text-[10px] text-muted/50">{timeAgo}</span>}
-            {raw.prUrl && (
-              <a href={raw.prUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="text-[11px] text-accent flex items-center gap-1 hover:underline">
-                <GitPullRequest size={10} /> PR #{raw.prNumber}
+            {raw.needsReply && (
+              <span className="text-[10px] text-amber-400 bg-amber-500/15 px-1.5 py-0.5 rounded font-medium flex items-center gap-1">
+                <MessageSquare size={9} /> Needs reply
+              </span>
+            )}
+            {raw.prUrl ? (
+              <a href={raw.prUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-accent flex items-center gap-1 hover:underline">
+                <GitPullRequest size={10} />
+                {raw.prMergedAt ? (
+                  <span className="text-purple-400">Merged</span>
+                ) : (
+                  <span>PR</span>
+                )}
               </a>
+            ) : raw.branch ? (
+              <span className="text-[10px] text-muted/50 font-mono truncate max-w-[180px]">{raw.branch}</span>
+            ) : null}
+            {raw.linearUrl && (
+              <a href={raw.linearUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-violet-400 flex items-center gap-1 hover:underline">
+                <CircleDot size={10} /> Linear
+              </a>
+            )}
+            {raw.testingStatus && raw.testingStatus !== "untested" && (
+              <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${testingColors[raw.testingStatus] ?? testingColors.untested}`}>
+                {raw.testingStatus === "verified" ? "✓ Verified" : raw.testingStatus}
+              </span>
+            )}
+            {raw.totalCostUsd != null && (
+              <span className="text-[10px] text-muted/40">${raw.totalCostUsd.toFixed(2)}</span>
             )}
           </div>
         </div>
-        <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+          {onChatAbout && (
+            <button onClick={onChatAbout} className="text-accent/50 hover:text-accent transition-colors p-1" title="Chat about this">
+              <MessageSquare size={14} />
+            </button>
+          )}
+          {onAgentAction && (
+            <button onClick={() => onAgentAction(`Clanker session: ${prompt}\nRepo: ${raw.repo ?? "unknown"}\nStatus: ${status}\nBranch: ${raw.branch ?? "N/A"}\n${raw.prUrl ? `PR: ${raw.prUrl}` : ""}\n${raw.linearUrl ? `Linear: ${raw.linearUrl}` : ""}`)} className="text-purple-400/50 hover:text-purple-400 transition-colors p-1" title="Run with agent">
+              <Bot size={14} />
+            </button>
+          )}
+          <CustomActionsMenu
+            source="clanker"
+            context={{ title: prompt, identifier: raw.id ?? "", description: raw.prompt ?? "", repo: raw.repo ?? "", branch: raw.branch ?? "", status: status, prUrl: raw.prUrl ?? "", linearUrl: raw.linearUrl ?? "" }}
+            onAction={onChatAbout ?? (() => {})}
+            onAgentAction={onAgentAction}
+            onCreateTaskAction={onCreateTaskAction}
+            size={14}
+          />
           {raw.url && (
             <a href={raw.url} target="_blank" rel="noopener noreferrer" className="text-accent/50 hover:text-accent transition-colors p-1" title="Open in Clanker">
               <ExternalLink size={14} />
             </a>
           )}
-          <SnoozeButton source={item.source} sourceId={item.source_id} onDone={() => onDismiss(item)} size={14} />
-          <button onClick={() => { setFading(true); setTimeout(() => onDismiss(item), 300); }} className="text-red-400/50 hover:text-red-400 transition-colors p-1" title="Dismiss">
-            <X size={14} />
-          </button>
         </div>
       </div>
-      {expanded && (
-        <div className="px-4 pb-3 border-t border-border/50 pt-3 text-xs space-y-2">
-          {raw.summary && (
-            <div>
-              <span className="text-muted block mb-1">Summary</span>
-              <div className="text-foreground/80 whitespace-pre-wrap">{raw.summary}</div>
-            </div>
-          )}
-          {raw.prompt && raw.prompt.length > 120 && (
-            <div>
-              <span className="text-muted block mb-1">Full prompt</span>
-              <div className="text-foreground/60 whitespace-pre-wrap">{raw.prompt}</div>
-            </div>
-          )}
-          {raw.url && (
-            <a href={raw.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-[11px] text-accent hover:underline mt-2">
-              <Zap size={10} /> Open session in Clanker
-            </a>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -5024,11 +5120,12 @@ function AgentFollowUpInput({ sessionId, onSent }: { sessionId: string; onSent: 
   );
 }
 
-function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef }: {
+function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef, hidePrompt }: {
   session: { id: string; status: string; summary?: string; failure_reason?: string; tool_calls?: string };
   onOpenChat?: (sessionId: string) => void;
   onRefresh?: () => void;
   toggleRef?: React.MutableRefObject<(() => void) | null>;
+  hidePrompt?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   useEffect(() => { if (toggleRef) toggleRef.current = () => setExpanded(v => !v); }, [toggleRef]);
@@ -5159,26 +5256,34 @@ function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef }: {
     }).finally(() => setSending(false));
   };
 
+  // Filter out the initial user prompt if hidePrompt is set (parent card already shows it)
+  const displayMessages = hidePrompt
+    ? [...chatMessages.filter((msg, i) => !(msg.role === "user" && i === 0)), ...optimisticMessages]
+    : [...chatMessages, ...optimisticMessages];
+
   return (
     <div className="mt-1.5 mb-1.5">
-      <div className="flex items-start gap-1.5 text-xs text-purple-400">
-        <button onClick={() => setExpanded(!expanded)} className="cursor-pointer hover:text-purple-300 transition-colors shrink-0 mt-0.5 flex items-center gap-1">
-          {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-          <Bot size={11} />
-        </button>
-        <span className="font-medium cursor-pointer" onClick={(e) => { if (window.getSelection()?.toString()) { e.stopPropagation(); return; } setExpanded(!expanded); }}>
-          {isRunning ? "Working..." : session.summary ? (session.summary.split("\n")[0].replace(/^\*\*.*?\*\*\s*/, "").replace(/^#+\s*/, "").slice(0, 120) || session.summary.slice(0, 120)) : session.failure_reason ? "Failed" : "Agent result"}
-        </span>
-      </div>
+      {/* When hidePrompt is set, the parent card handles expand/collapse — no toggle row needed */}
+      {!hidePrompt && (
+        <div className="flex items-start gap-1.5 text-xs text-purple-400">
+          <button onClick={() => setExpanded(!expanded)} className="cursor-pointer hover:text-purple-300 transition-colors shrink-0 mt-0.5 flex items-center gap-1">
+            {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <Bot size={12} />
+          </button>
+          <span className="font-medium cursor-pointer" onClick={(e) => { if (window.getSelection()?.toString()) { e.stopPropagation(); return; } setExpanded(!expanded); }}>
+            {isRunning ? "Working..." : session.summary ? (session.summary.split("\n")[0].replace(/^\*\*.*?\*\*\s*/, "").replace(/^#+\s*/, "").slice(0, 120) || session.summary.slice(0, 120)) : session.failure_reason ? "Failed" : "Agent result"}
+          </span>
+        </div>
+      )}
       {expanded && (
-        <div className="mt-2 ml-1 border-l-2 border-purple-500/20 pl-3 space-y-3">
+        <div className="mt-2 space-y-3">
           {loading && (
             <div className="flex items-center gap-1.5 text-xs text-muted">
               <Loader2 size={12} className="animate-spin" /> Loading...
             </div>
           )}
           {/* Q&A history */}
-          {[...chatMessages, ...optimisticMessages].map((msg, i) => (
+          {displayMessages.map((msg, i) => (
             <div key={i}>
               {msg.role === "user" ? (
                 <div className="flex items-start gap-2">
@@ -5235,17 +5340,17 @@ function AgentSessionInline({ session, onOpenChat, onRefresh, toggleRef }: {
             {onOpenChat && (
               <button
                 onClick={() => onOpenChat(session.id)}
-                className="text-[10px] text-purple-400/40 hover:text-purple-300 transition-colors flex items-center gap-1"
+                className="text-xs text-purple-400/50 hover:text-purple-300 transition-colors flex items-center gap-1"
               >
-                <MessageSquare size={9} /> Full chat
+                <MessageSquare size={11} /> Full chat
               </button>
             )}
             {!isRunning && session.summary && (
               <button
                 onClick={() => setClankerModal(true)}
-                className="text-[10px] text-orange-400/40 hover:text-orange-300 transition-colors flex items-center gap-1"
+                className="text-xs text-orange-400/50 hover:text-orange-300 transition-colors flex items-center gap-1"
               >
-                <Zap size={9} /> Clanker session
+                <Zap size={11} /> Clanker session
               </button>
             )}
           </div>

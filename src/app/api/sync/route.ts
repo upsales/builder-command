@@ -203,18 +203,23 @@ export async function POST(request: Request) {
         tasks.push((async () => {
           try {
             send("status", { source: "clanker", state: "fetching sessions..." });
-            const sessions = await fetchClankerSessions();
-            // Only show active/recent sessions (not completed ones older than 7 days)
+            const sessions = await fetchClankerSessions(profile.linear_email || undefined);
+            // Filter out old finished sessions (older than 7 days)
             const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-            const relevant = sessions.filter(s =>
-              s.status !== "completed" && s.status !== "cancelled" ||
-              (s.completedAt && s.completedAt > cutoff)
-            );
+            const finishedStatuses = new Set(["completed", "cancelled", "aborted", "failed", "stale"]);
+            const relevant = sessions.filter(s => {
+              if (finishedStatuses.has(s.status)) {
+                const finishedDate = s.completedAt || s.updatedAt;
+                return finishedDate > cutoff;
+              }
+              return true;
+            });
             send("status", { source: "clanker", state: `found ${relevant.length} sessions` });
             const sourceIds: string[] = [];
             for (const session of relevant) {
               sourceIds.push(session.id);
-              const statusEmoji = session.status === "running" ? "⚡" : session.status === "completed" ? "✓" : session.status === "failed" ? "✗" : "◷";
+              const statusEmojis: Record<string, string> = { running: "⚡", waiting: "⏸", completed: "✓", failed: "✗", aborted: "—", parked: "⏸", stale: "⚠" };
+              const statusEmoji = statusEmojis[session.status] ?? "◷";
               const repoLabel = session.repo ? ` (${session.repo})` : "";
               upsertItem({
                 source: "clanker",

@@ -11,19 +11,28 @@ export interface ClankerSession {
   id: string;
   prompt: string;
   repo: string | null;
-  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "aborted" | "stale" | "parked";
   sessionType: string;
+  sessionSubtype: string | null;
+  sessionMode: string | null;
   branch: string | null;
   prUrl: string | null;
   prNumber: number | null;
+  prMergedAt: string | null;
+  linearUrl: string | null;
   summary: string | null;
+  needsReply: boolean;
+  testingStatus: string | null;
+  totalCostUsd: number | null;
+  runtimeState: string | null;
+  profileName: string | null;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
   url: string;
 }
 
-export async function fetchSessions(): Promise<ClankerSession[]> {
+export async function fetchSessions(filterEmail?: string): Promise<ClankerSession[]> {
   const res = await fetch(`${CLANKER_URL}/api/sessions?limit=50`, {
     headers: headers(),
   });
@@ -31,19 +40,43 @@ export async function fetchSessions(): Promise<ClankerSession[]> {
     throw new Error(`Clanker API error: ${res.status} ${res.statusText}`);
   }
   const data = await res.json();
-  const sessions: unknown[] = Array.isArray(data) ? data : (data.sessions ?? data.items ?? []);
+  let sessions: unknown[] = Array.isArray(data) ? data : ([
+    ...(data.active ?? []), ...(data.waiting ?? []), ...(data.completed ?? []),
+    ...(data.failed ?? []), ...(data.aborted ?? []), ...(data.stale ?? []),
+    ...(data.parked ?? []), ...(data.sessions ?? []), ...(data.items ?? []),
+  ]);
+  // Filter by user email if provided
+  const email = filterEmail || process.env.CLANKER_USER_EMAIL;
+  if (email) {
+    sessions = sessions.filter((s: unknown) => {
+      const raw = s as Record<string, unknown>;
+      return String(raw.profileEmail ?? "").toLowerCase() === email.toLowerCase();
+    });
+  }
   return sessions.map((s: unknown) => {
     const raw = s as Record<string, unknown>;
+    // Map API status to our status enum
+    const apiStatus = String(raw.status ?? "queued");
+    const status = apiStatus === "active" ? "running" : apiStatus as ClankerSession["status"];
     return {
       id: String(raw.id ?? ""),
-      prompt: String(raw.prompt ?? raw.title ?? ""),
-      repo: raw.repo ? String(raw.repo) : null,
-      status: (raw.status as ClankerSession["status"]) ?? "queued",
+      prompt: String(raw.title ?? raw.prompt ?? ""),
+      repo: raw.repoName ? String(raw.repoName) : (raw.repo ? String(raw.repo) : null),
+      status: status ?? "queued",
       sessionType: String(raw.sessionType ?? raw.session_type ?? "code"),
+      sessionSubtype: raw.sessionSubtype ? String(raw.sessionSubtype) : null,
+      sessionMode: raw.sessionMode ? String(raw.sessionMode) : null,
       branch: raw.branch ? String(raw.branch) : null,
       prUrl: raw.prUrl ? String(raw.prUrl) : (raw.pr_url ? String(raw.pr_url) : null),
       prNumber: raw.prNumber ? Number(raw.prNumber) : (raw.pr_number ? Number(raw.pr_number) : null),
+      prMergedAt: raw.prMergedAt ? String(raw.prMergedAt) : null,
+      linearUrl: raw.linearUrl ? String(raw.linearUrl) : null,
       summary: raw.summary ? String(raw.summary) : null,
+      needsReply: Boolean(raw.needsReply),
+      testingStatus: raw.testingStatus ? String(raw.testingStatus) : null,
+      totalCostUsd: raw.totalCostUsd ? Number(raw.totalCostUsd) : null,
+      runtimeState: raw.runtimeState ? String(raw.runtimeState) : null,
+      profileName: raw.profileName ? String(raw.profileName) : null,
       createdAt: String(raw.createdAt ?? raw.created_at ?? new Date().toISOString()),
       updatedAt: String(raw.updatedAt ?? raw.updated_at ?? new Date().toISOString()),
       completedAt: raw.completedAt ? String(raw.completedAt) : (raw.completed_at ? String(raw.completed_at) : null),

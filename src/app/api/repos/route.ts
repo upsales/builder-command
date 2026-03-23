@@ -5,7 +5,13 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const { repos } = await request.json();
+  let repos: unknown;
+  try {
+    const body = await request.json();
+    repos = body.repos;
+  } catch {
+    return Response.json({ ok: true, statuses: getRepoStatuses() });
+  }
   if (Array.isArray(repos)) {
     for (const repo of repos) {
       if (typeof repo === "string") {

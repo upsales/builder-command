@@ -161,8 +161,7 @@ button, a, select, [role="button"], label, summary {
   content: attr(data-tooltip);
   position: absolute;
   bottom: calc(100% + 4px);
-  left: 50%;
-  transform: translateX(-50%);
+  left: 0;
   background: #1a1a2e;
   color: var(--foreground);
   padding: 6px 10px;
@@ -170,7 +169,9 @@ button, a, select, [role="button"], label, summary {
   font-size: 12px;
   line-height: 1.4;
   white-space: pre-line;
-  max-width: 350px;
+  word-break: break-word;
+  max-width: min(400px, 90vw);
+  width: max-content;
   z-index: 50;
   pointer-events: none;
   border: 1px solid var(--border);
