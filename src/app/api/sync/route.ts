@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getProfile, upsertItem, removeStaleItems, getItems } from "@/lib/items";
+import { getProfile, upsertItem, removeStaleItems, getItems, recordSyncTime, getSyncTimes } from "@/lib/items";
 import { fetchAssignedIssues } from "@/lib/integrations/linear";
 import { fetchPRsNeedingReview, fetchMyPRs, fetchAssignedPRs } from "@/lib/integrations/github";
 import { fetchChannelMessages, type SyncPhase } from "@/lib/integrations/slack";
@@ -55,8 +55,10 @@ export async function POST(request: Request) {
               });
             }
             removeStaleItems("linear", sourceIds);
+            recordSyncTime("linear", sourceIds.length);
             sendItems();
           } catch (e) {
+            recordSyncTime("linear", 0, e instanceof Error ? e.message : String(e));
             send("error", { source: "linear", message: e instanceof Error ? e.message : String(e) });
           }
         })());
@@ -100,8 +102,10 @@ export async function POST(request: Request) {
               });
             }
             removeStaleItems("github", sourceIds);
+            recordSyncTime("github", sourceIds.length);
             sendItems();
           } catch (e) {
+            recordSyncTime("github", 0, e instanceof Error ? e.message : String(e));
             send("error", { source: "github", message: e instanceof Error ? e.message : String(e) });
           }
         })());
@@ -152,9 +156,11 @@ export async function POST(request: Request) {
             if (!isQuickSync) {
               removeStaleItems("slack", finalSourceIds);
             }
+            recordSyncTime("slack", finalSourceIds.length);
             sendItems();
           } catch (e) {
             console.error("[sync] Slack error:", e);
+            recordSyncTime("slack", 0, e instanceof Error ? e.message : String(e));
             send("error", { source: "slack", message: e instanceof Error ? e.message : String(e) });
           }
         })());
@@ -181,9 +187,11 @@ export async function POST(request: Request) {
               });
             }
             removeStaleItems("calendar", sourceIds);
+            recordSyncTime("calendar", sourceIds.length);
             sendItems();
           } catch (e) {
             console.error("[sync] Calendar error:", e);
+            recordSyncTime("calendar", 0, e instanceof Error ? e.message : String(e));
             send("error", { source: "calendar", message: e instanceof Error ? e.message : String(e) });
           }
         })());
@@ -192,7 +200,7 @@ export async function POST(request: Request) {
       await Promise.all(tasks);
 
       notifyChange();
-      send("done", {});
+      send("done", { syncTimes: getSyncTimes() });
       controller.close();
     },
   });

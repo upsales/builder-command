@@ -182,4 +182,5 @@ function migrate(db: Database.Database) {
   try { db.exec("ALTER TABLE daily_todos ADD COLUMN completed_at TEXT"); } catch { /* already exists */ }
   try { db.exec("ALTER TABLE daily_todos ADD COLUMN agent_prompt TEXT"); } catch { /* already exists */ }
   try { db.exec("ALTER TABLE agent_sessions ADD COLUMN sdk_session_id TEXT"); } catch { /* already exists */ }
+  try { db.exec("ALTER TABLE items ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))"); } catch { /* already exists */ }
 }

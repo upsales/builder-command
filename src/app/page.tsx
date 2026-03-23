@@ -1156,6 +1156,7 @@ export default function Home() {
   const [slackError, setSlackError] = useState("");
   const [syncErrors, setSyncErrors] = useState<string[]>([]);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
+  const [syncTimes, setSyncTimes] = useState<Record<string, { at: string; count: number; error: string | null }>>({});
   const [repoStatuses, setRepoStatuses] = useState<Record<string, string>>({});
   const [watchedChannels, setWatchedChannels] = useLocalStorage<string[]>("slack:watchedChannels", []);
   const [availableChannels, setAvailableChannels] = useState<{ id: string; name: string; isDm: boolean; memberCount?: number }[]>([]);
@@ -1367,6 +1368,8 @@ export default function Home() {
               } else if (eventType === "status") {
                 const src = payload.source ? `[${payload.source}] ` : "";
                 setSyncStatus(`${src}${payload.state}`);
+              } else if (eventType === "done" && payload.syncTimes) {
+                setSyncTimes(payload.syncTimes);
               }
             } catch { /* ignore parse errors */ }
           }
@@ -1423,6 +1426,7 @@ export default function Home() {
         const res = await fetch("/api/changes");
         const data = await res.json();
         if (data.agentStatus) setAgentStatus(data.agentStatus);
+        if (data.syncTimes) setSyncTimes(data.syncTimes);
         if (data.v !== lastChangeRef.current) {
           lastChangeRef.current = data.v;
           const itemsRes = await fetch("/api/items");
@@ -1524,10 +1528,48 @@ export default function Home() {
             <span className="truncate max-w-[200px]">{syncStatus ?? "Syncing..."}</span>
           </div>
         ) : (
-          <div className="flex items-center gap-1.5 text-[10px] text-muted/50">
-            <span>quick {nextSyncIn}s</span>
-            <span>·</span>
-            <span>full {Math.floor(nextFullSyncIn / 60)}:{String(nextFullSyncIn % 60).padStart(2, "0")}</span>
+          <div className="flex items-center gap-1.5 text-[10px] text-muted/50 group relative">
+            {Object.keys(syncTimes).length > 0 ? (
+              <>
+                <CheckCircle size={10} className={Object.values(syncTimes).some(s => s.error) ? "text-yellow-400" : "text-emerald-400"} />
+                <span>
+                  synced {(() => {
+                    const latest = Object.values(syncTimes).reduce((a, b) => a.at > b.at ? a : b);
+                    const ago = Math.round((Date.now() - new Date(latest.at).getTime()) / 1000);
+                    if (ago < 5) return "just now";
+                    if (ago < 60) return `${ago}s ago`;
+                    if (ago < 3600) return `${Math.floor(ago / 60)}m ago`;
+                    return `${Math.floor(ago / 3600)}h ago`;
+                  })()}
+                </span>
+                <span>·</span>
+                <span>next {nextSyncIn}s</span>
+                {/* Hover tooltip with per-source details */}
+                <div className="absolute left-0 top-full mt-1 z-50 hidden group-hover:block bg-card border border-border rounded-lg shadow-lg p-2 min-w-[200px]">
+                  {Object.entries(syncTimes).map(([source, info]) => {
+                    const ago = Math.round((Date.now() - new Date(info.at).getTime()) / 1000);
+                    const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.floor(ago / 60)}m ago` : `${Math.floor(ago / 3600)}h ago`;
+                    return (
+                      <div key={source} className="flex items-center justify-between gap-3 py-0.5 text-[10px]">
+                        <span className="capitalize text-muted">{source}</span>
+                        <span className={info.error ? "text-red-400" : "text-muted/70"}>
+                          {info.error ? "failed" : `${info.count} items · ${agoStr}`}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  <div className="border-t border-border mt-1 pt-1 text-[9px] text-muted/40">
+                    full sync in {Math.floor(nextFullSyncIn / 60)}:{String(nextFullSyncIn % 60).padStart(2, "0")}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <span>quick {nextSyncIn}s</span>
+                <span>·</span>
+                <span>full {Math.floor(nextFullSyncIn / 60)}:{String(nextFullSyncIn % 60).padStart(2, "0")}</span>
+              </>
+            )}
           </div>
         )}
 

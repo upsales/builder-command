@@ -1,4 +1,4 @@
-import { getDb } from "./db";
+import { getDb, setSetting, getSetting } from "./db";
 import { TodoItem, Profile } from "./types";
 import { randomUUID } from "crypto";
 
@@ -101,11 +101,26 @@ export function upsertItem(item: {
 }): void {
   const db = getDb();
   db.prepare(
-    `INSERT INTO items (id, source, source_id, title, url, raw_data)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(source, source_id) DO UPDATE SET title = ?, url = ?, raw_data = ?`
+    `INSERT INTO items (id, source, source_id, title, url, raw_data, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(source, source_id) DO UPDATE SET title = ?, url = ?, raw_data = ?, updated_at = datetime('now')`
   ).run(
     randomUUID(), item.source, item.source_id, item.title, item.url ?? null, item.raw_data ?? null,
     item.title, item.url ?? null, item.raw_data ?? null,
   );
+}
+
+export function recordSyncTime(source: string, itemCount: number, error?: string): void {
+  const now = new Date().toISOString();
+  setSetting(`sync:${source}`, JSON.stringify({ at: now, count: itemCount, error: error || null }));
+}
+
+export function getSyncTimes(): Record<string, { at: string; count: number; error: string | null }> {
+  const sources = ["linear", "github", "slack", "calendar"];
+  const result: Record<string, { at: string; count: number; error: string | null }> = {};
+  for (const s of sources) {
+    const val = getSetting(`sync:${s}`);
+    if (val) result[s] = JSON.parse(val);
+  }
+  return result;
 }
