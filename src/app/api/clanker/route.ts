@@ -1,17 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { getProfile } from "@/lib/items";
+import { fetchSessions, fetchRepos, createSession } from "@/lib/integrations/clanker";
 
-const CLANKER_URL = process.env.CLANKER_URL || "https://clanker.upsales.com";
-const CLANKER_API_KEY = process.env.CLANKER_API_KEY || "";
-
-function clankerHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (CLANKER_API_KEY) h["X-API-Key"] = CLANKER_API_KEY;
-  return h;
-}
-
-// POST — proxy session creation to clanker
+// POST — create a new clanker session
 export async function POST(request: NextRequest) {
   const body = await request.json();
 
@@ -34,20 +26,34 @@ export async function POST(request: NextRequest) {
 
   // Remove internal fields before forwarding to clanker
   const { source, sourceId, ...clankerBody } = body;
+  void source; void sourceId;
 
-  const res = await fetch(`${CLANKER_URL}/api/sessions`, {
-    method: "POST",
-    headers: clankerHeaders(),
-    body: JSON.stringify(clankerBody),
-  });
-
-  const data = await res.json();
-  return NextResponse.json(data, { status: res.status });
+  try {
+    const session = await createSession(clankerBody);
+    return NextResponse.json(session);
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : "Failed" }, { status: 500 });
+  }
 }
 
-// GET — proxy repos list from clanker
-export async function GET() {
-  const res = await fetch(`${CLANKER_URL}/api/repos`, { headers: clankerHeaders() });
-  const data = await res.json();
-  return NextResponse.json(data, { status: res.status });
+// GET — list sessions or repos
+export async function GET(request: NextRequest) {
+  const type = request.nextUrl.searchParams.get("type");
+
+  if (type === "sessions") {
+    try {
+      const sessions = await fetchSessions();
+      return NextResponse.json(sessions);
+    } catch (e) {
+      return NextResponse.json({ error: e instanceof Error ? e.message : "Failed" }, { status: 500 });
+    }
+  }
+
+  // Default: repos list (backwards compatible)
+  try {
+    const repos = await fetchRepos();
+    return NextResponse.json(repos);
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : "Failed" }, { status: 500 });
+  }
 }

@@ -293,7 +293,7 @@ ${agentContext}
 ${modeDesc}
 ${opts.sourceContext}
 
-YOUR TOOLS are provided via MCP server "bc-tools". They are prefixed with mcp__bc-tools__ but you can call them directly. Available tools: dismiss_item, snooze_item, merge_pr, enable_auto_merge, add_reviewer, update_linear_status, assign_linear_issue, reply_slack, react_slack, create_todo, complete_todo, search_code, read_file, list_files, clone_repo, web_fetch, api_fetch, browse_web, save_memory, delete_memory, execute_code, write_file, edit_file, schedule_followup.
+YOUR TOOLS are provided via MCP server "bc-tools". They are prefixed with mcp__bc-tools__ but you can call them directly. Available tools: dismiss_item, snooze_item, merge_pr, enable_auto_merge, add_reviewer, update_linear_status, assign_linear_issue, reply_slack, react_slack, create_todo, complete_todo, search_code, read_file, list_files, clone_repo, web_fetch, api_fetch, browse_web, save_memory, delete_memory, execute_code, write_file, edit_file, schedule_followup, start_clanker_session.
 
 RULES:
 1. Write a 1-sentence PLAN, then execute using tools
@@ -303,6 +303,7 @@ RULES:
 5. Be efficient — minimum tool calls needed
 6. NEVER use the complete_todo tool. The user will review your work and decide when to mark it done.
 7. For tasks that require WAITING (CI checks, deployments, external responses), use schedule_followup to pause and resume later.
+8. **PREFER CLANKER FOR CODING:** When a task requires writing, modifying, or implementing code, use the start_clanker_session tool to delegate coding work to Clanker instead of writing code yourself. Clanker is better at coding tasks — it can clone repos, create branches, write code, and open PRs. Use it for implementation work, bug fixes, feature development, and refactoring. You should still do research, planning, and non-coding tasks yourself.
 
 TASK: "${taskText}"${opts.agentPrompt ? `\n\nTASK-SPECIFIC INSTRUCTIONS FROM USER:\n${opts.agentPrompt}` : ""}`;
 }

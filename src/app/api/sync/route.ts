@@ -4,6 +4,7 @@ import { fetchAssignedIssues } from "@/lib/integrations/linear";
 import { fetchPRsNeedingReview, fetchMyPRs, fetchAssignedPRs } from "@/lib/integrations/github";
 import { fetchChannelMessages, type SyncPhase } from "@/lib/integrations/slack";
 import { fetchEvents } from "@/lib/integrations/google-calendar";
+import { fetchSessions as fetchClankerSessions } from "@/lib/integrations/clanker";
 import { notifyChange } from "@/lib/changeNotifier";
 export async function POST(request: Request) {
   const profile = getProfile();
@@ -193,6 +194,41 @@ export async function POST(request: Request) {
             console.error("[sync] Calendar error:", e);
             recordSyncTime("calendar", 0, e instanceof Error ? e.message : String(e));
             send("error", { source: "calendar", message: e instanceof Error ? e.message : String(e) });
+          }
+        })());
+      }
+
+      // Clanker sessions (skip on quick sync)
+      if (!isQuickSync && (process.env.CLANKER_URL || process.env.CLANKER_API_KEY)) {
+        tasks.push((async () => {
+          try {
+            send("status", { source: "clanker", state: "fetching sessions..." });
+            const sessions = await fetchClankerSessions();
+            // Only show active/recent sessions (not completed ones older than 7 days)
+            const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+            const relevant = sessions.filter(s =>
+              s.status !== "completed" && s.status !== "cancelled" ||
+              (s.completedAt && s.completedAt > cutoff)
+            );
+            send("status", { source: "clanker", state: `found ${relevant.length} sessions` });
+            const sourceIds: string[] = [];
+            for (const session of relevant) {
+              sourceIds.push(session.id);
+              const statusEmoji = session.status === "running" ? "⚡" : session.status === "completed" ? "✓" : session.status === "failed" ? "✗" : "◷";
+              const repoLabel = session.repo ? ` (${session.repo})` : "";
+              upsertItem({
+                source: "clanker",
+                source_id: session.id,
+                title: `${statusEmoji} ${session.prompt.substring(0, 120)}${repoLabel}`,
+                url: session.url,
+                raw_data: JSON.stringify(session),
+              });
+            }
+            removeStaleItems("clanker", sourceIds);
+            sendItems();
+          } catch (e) {
+            console.error("[sync] Clanker error:", e);
+            send("error", { source: "clanker", message: e instanceof Error ? e.message : String(e) });
           }
         })());
       }
