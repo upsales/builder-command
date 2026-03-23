@@ -258,52 +258,6 @@ export async function fetchRepoIssues(repo: string, state: "open" | "closed" | "
   }
 }
 
-export async function submitPRReview(
-  repo: string,
-  prNumber: number,
-  event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
-  body: string,
-  comments?: { path: string; line: number; body: string }[],
-): Promise<{ success: boolean; message: string }> {
-  const [owner, repoName] = repo.split("/");
-  try {
-    await octokit.pulls.createReview({
-      owner,
-      repo: repoName,
-      pull_number: prNumber,
-      event,
-      body,
-      comments: comments?.map((c) => ({
-        path: c.path,
-        line: c.line,
-        body: c.body,
-      })),
-    });
-    return { success: true, message: `Review submitted: ${event}` };
-  } catch (e) {
-    return { success: false, message: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-export async function commentOnPR(
-  repo: string,
-  prNumber: number,
-  body: string,
-): Promise<{ success: boolean; message: string }> {
-  const [owner, repoName] = repo.split("/");
-  try {
-    await octokit.issues.createComment({
-      owner,
-      repo: repoName,
-      issue_number: prNumber,
-      body,
-    });
-    return { success: true, message: "Comment posted" };
-  } catch (e) {
-    return { success: false, message: e instanceof Error ? e.message : String(e) };
-  }
-}
-
 export async function fetchCollaborators(repo: string): Promise<string[]> {
   const [owner, repoName] = repo.split("/");
   try {
