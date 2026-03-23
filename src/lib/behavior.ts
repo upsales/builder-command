@@ -14,7 +14,8 @@ export type BehaviorAction =
   | "reply_slack"
   | "create_task"
   | "complete_task"
-  | "start_agent";
+  | "start_agent"
+  | "custom_action";
 
 export interface BehaviorEntry {
   id: number;

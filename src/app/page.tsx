@@ -234,6 +234,21 @@ function CustomActionsMenu({ source, context, onAction, onAgentAction, onCreateT
     return true;
   });
 
+  const logCustomAction = (actionName: string, mode: "chat" | "agent" | "task") => {
+    fetch("/api/behavior", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "custom_action",
+        source,
+        source_id: context.identifier || context.title,
+        item_title: context.title,
+        item_context: { source, repo: context.repo, state: context.status || context.state },
+        metadata: { action_name: actionName, mode },
+      }),
+    }).catch(() => {});
+  };
+
   const fillTemplate = (template: string) => {
     let result = template;
     for (const [key, val] of Object.entries(context)) {
@@ -242,82 +257,76 @@ function CustomActionsMenu({ source, context, onAction, onAgentAction, onCreateT
     return result;
   };
 
-  if (applicable.length === 0 && !open) return null;
+  if (applicable.length === 0) return null;
 
   return (
-    <div className="relative">
-      <button
-        onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
-        className="text-violet-400/50 hover:text-violet-400 transition-colors p-1"
-        title="Custom Actions"
-      >
-        <Zap size={size} />
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg shadow-xl py-1 min-w-[200px]" onClick={(e) => e.stopPropagation()}>
-          {applicable.map((a) => (
-            <div key={a.id} className="flex items-center">
-              {a.createTask && onCreateTaskAction ? (
-                <button
-                  onClick={() => {
-                    const taskText = `${a.emoji} ${a.name}: ${context.identifier || context.title}`;
-                    onCreateTaskAction(taskText, fillTemplate(a.prompt));
-                    setOpen(false);
-                  }}
-                  className="flex-1 text-left px-3 py-1.5 text-xs hover:bg-card-hover transition-colors flex items-center gap-2"
-                  title="Creates a task and runs agent"
-                >
-                  <span>{a.emoji}</span> {a.name}
-                  <Bot size={9} className="text-purple-400/40 ml-auto" />
+    <div className="flex items-center gap-0.5">
+      {/* Inline action buttons — emoji only, name on hover */}
+      {applicable.map((a) => (
+        <button
+          key={a.id}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (a.createTask && onCreateTaskAction) {
+              const taskText = `${a.emoji} ${a.name}: ${context.identifier || context.title}`;
+              onCreateTaskAction(taskText, fillTemplate(a.prompt));
+              logCustomAction(a.name, "task");
+            } else if (onAgentAction) {
+              onAgentAction(fillTemplate(a.prompt));
+              logCustomAction(a.name, "agent");
+            } else {
+              onAction(fillTemplate(a.prompt));
+              logCustomAction(a.name, "chat");
+            }
+          }}
+          className="hover:bg-card-hover rounded p-1 transition-colors text-sm leading-none"
+          data-tooltip={`${a.name}${a.createTask ? " (task+agent)" : ""}`}
+        >
+          {a.emoji}
+        </button>
+      ))}
+      {/* Edit actions dropdown */}
+      <div className="relative">
+        <button
+          onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+          className="text-muted/30 hover:text-muted/60 transition-colors p-1"
+          data-tooltip="Edit actions"
+        >
+          <Settings size={size - 2} />
+        </button>
+        {open && (
+          <div className="absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg shadow-xl py-1 min-w-[200px]" onClick={(e) => e.stopPropagation()}>
+            {applicable.map((a) => (
+              <div key={a.id} className="flex items-center px-3 py-1.5 text-xs hover:bg-card-hover transition-colors">
+                <span className="mr-2">{a.emoji}</span>
+                <span className="flex-1">{a.name}</span>
+                <button onClick={() => setActions(actions.filter((x) => x.id !== a.id))} className="text-red-400/50 hover:text-red-400 ml-2 text-xs">×</button>
+              </div>
+            ))}
+            <div className="border-t border-border/50 mt-1 pt-1">
+              {!editing ? (
+                <button onClick={() => setEditing(true)} className="w-full text-left px-3 py-1.5 text-[10px] text-muted/60 hover:text-muted hover:bg-card-hover transition-colors">
+                  + Add action...
                 </button>
               ) : (
-                <>
-                  <button
-                    onClick={() => { onAction(fillTemplate(a.prompt)); setOpen(false); }}
-                    className="flex-1 text-left px-3 py-1.5 text-xs hover:bg-card-hover transition-colors flex items-center gap-2"
-                  >
-                    <span>{a.emoji}</span> {a.name}
-                  </button>
-                  {onAgentAction && !editing && (
-                    <button
-                      onClick={() => { onAgentAction(fillTemplate(a.prompt)); setOpen(false); }}
-                      className="text-purple-400/50 hover:text-purple-400 px-2 text-xs flex items-center gap-0.5"
-                      title="Run with Agent"
-                    >
-                      <Bot size={10} />
-                    </button>
-                  )}
-                </>
-              )}
-              {editing && (
-                <button onClick={() => setActions(actions.filter((x) => x.id !== a.id))} className="text-red-400/50 hover:text-red-400 px-2 text-xs">×</button>
-              )}
-            </div>
-          ))}
-          <div className="border-t border-border/50 mt-1 pt-1">
-            {!editing ? (
-              <button onClick={() => setEditing(true)} className="w-full text-left px-3 py-1.5 text-[10px] text-muted/60 hover:text-muted hover:bg-card-hover transition-colors">
-                + Edit actions...
-              </button>
-            ) : (
-              <div className="px-3 py-2 space-y-1.5">
-                <div className="flex gap-1">
-                  <input value={newEmoji} onChange={(e) => setNewEmoji(e.target.value)} className="w-8 bg-background border border-border rounded px-1 py-0.5 text-xs text-center" placeholder="⚡" />
-                  <input value={newName} onChange={(e) => setNewName(e.target.value)} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs" placeholder="Action name" />
-                </div>
-                <textarea value={newPrompt} onChange={(e) => setNewPrompt(e.target.value)} className="w-full bg-background border border-border rounded px-2 py-1 text-xs h-32 resize-none" placeholder="Prompt template... Use {title}, {identifier}, {description}, {repo}" />
-                <div className="flex gap-1">
-                  <select value={newSource} onChange={(e) => setNewSource(e.target.value as "linear" | "github" | "clanker" | "both")} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs">
-                    <option value="both">All</option>
-                    <option value="linear">Linear</option>
-                    <option value="github">GitHub</option>
-                    <option value="clanker">Clanker</option>
-                  </select>
-                  <input value={newRepo} onChange={(e) => setNewRepo(e.target.value)} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs" placeholder="Repo (optional)" />
-                </div>
-                <label className="flex items-center gap-1.5 text-[10px] text-muted cursor-pointer">
-                  <input type="checkbox" checked={newCreateTask} onChange={(e) => setNewCreateTask(e.target.checked)} className="rounded" />
-                  Create task + run agent
+                <div className="px-3 py-2 space-y-1.5">
+                  <div className="flex gap-1">
+                    <input value={newEmoji} onChange={(e) => setNewEmoji(e.target.value)} className="w-8 bg-background border border-border rounded px-1 py-0.5 text-xs text-center" placeholder="⚡" />
+                    <input value={newName} onChange={(e) => setNewName(e.target.value)} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs" placeholder="Action name" />
+                  </div>
+                  <textarea value={newPrompt} onChange={(e) => setNewPrompt(e.target.value)} className="w-full bg-background border border-border rounded px-2 py-1 text-xs h-32 resize-none" placeholder="Prompt template... Use {title}, {identifier}, {description}, {repo}" />
+                  <div className="flex gap-1">
+                    <select value={newSource} onChange={(e) => setNewSource(e.target.value as "linear" | "github" | "clanker" | "both")} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs">
+                      <option value="both">All</option>
+                      <option value="linear">Linear</option>
+                      <option value="github">GitHub</option>
+                      <option value="clanker">Clanker</option>
+                    </select>
+                    <input value={newRepo} onChange={(e) => setNewRepo(e.target.value)} className="flex-1 bg-background border border-border rounded px-2 py-0.5 text-xs" placeholder="Repo (optional)" />
+                  </div>
+                  <label className="flex items-center gap-1.5 text-[10px] text-muted cursor-pointer">
+                    <input type="checkbox" checked={newCreateTask} onChange={(e) => setNewCreateTask(e.target.checked)} className="rounded" />
+                    Create task + run agent
                 </label>
                 <div className="flex gap-1">
                   <button onClick={() => {
@@ -332,6 +341,7 @@ function CustomActionsMenu({ source, context, onAction, onAgentAction, onCreateT
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -3535,17 +3545,19 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                         if (r.isUnread) { firstUnreadIdx = i; break; }
                       }
                       return channelItems.map((item, idx) => (
-                        <SlackMessage
-                          key={item.id}
-                          item={item}
-                          onDismiss={onDismiss}
-                          isLast={idx === channelItems.length - 1}
-                          onDismissChannel={dismissAll}
-                          isContext={isDm && lastOtherIdx >= 0 && idx < lastOtherIdx}
-                          showNewDivider={firstUnreadIdx > 0 && idx === firstUnreadIdx}
-                          onImageClick={onImageClick}
-                          quickReplies={quickReplies}
-                        />
+                        <div key={item.id} className="relative">
+                          {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
+                          <SlackMessage
+                            item={item}
+                            onDismiss={onDismiss}
+                            isLast={idx === channelItems.length - 1}
+                            onDismissChannel={dismissAll}
+                            isContext={isDm && lastOtherIdx >= 0 && idx < lastOtherIdx}
+                            showNewDivider={firstUnreadIdx > 0 && idx === firstUnreadIdx}
+                            onImageClick={onImageClick}
+                            quickReplies={quickReplies}
+                          />
+                        </div>
                       ));
                     })()}
                   </div>
@@ -3702,7 +3714,8 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
             <CollapsibleGroup label="Clanker" icon={<Zap size={10} className="text-amber-400" />} count={clankerItems.length} defaultOpen>
               <div className="space-y-1 ml-3 border-l border-border/30 pl-2">
                 {clankerItems.map((item) => (
-                  <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                  <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 relative ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
+                    {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
                     <ClankerCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} />
                   </div>
                 ))}
@@ -3960,22 +3973,31 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
             </div>
           )}
           <div className="flex flex-col gap-1.5">
-            <button
-              onClick={handleAnalyzeBehavior}
-              disabled={analyzingBehavior}
-              className="w-full px-2 py-1.5 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1"
-            >
-              {analyzingBehavior ? <><Loader2 size={10} className="animate-spin" /> Analyzing...</> : "Analyze Patterns"}
-            </button>
-            {learnedPatterns.length > 0 && (
-              <button
-                onClick={handlePredictBehavior}
-                disabled={predictingBehavior}
-                className="w-full px-2 py-1.5 rounded text-[10px] bg-sky-500/10 text-sky-400 border border-sky-500/20 hover:bg-sky-500/20 transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1"
-              >
-                {predictingBehavior ? <><Loader2 size={10} className="animate-spin" /> Predicting...</> : "Predict Actions"}
-              </button>
-            )}
+            {(() => {
+              const total = behaviorStats?.total ?? 0;
+              const canAnalyze = total >= 5 && !analyzingBehavior;
+              const canPredict = learnedPatterns.length > 0 && total >= 10 && !predictingBehavior;
+              const analyzeTooltip = total < 5 ? `Need at least 5 tracked decisions (${total}/5)` : undefined;
+              const predictTooltip = learnedPatterns.length === 0 ? "Run Analyze Patterns first" : total < 10 ? `Need at least 10 tracked decisions (${total}/10)` : undefined;
+              return (<>
+                <button
+                  onClick={handleAnalyzeBehavior}
+                  disabled={!canAnalyze}
+                  className="w-full px-2 py-1.5 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1"
+                  data-tooltip={analyzeTooltip}
+                >
+                  {analyzingBehavior ? <><Loader2 size={10} className="animate-spin" /> Analyzing...</> : "Analyze Patterns"}
+                </button>
+                <button
+                  onClick={handlePredictBehavior}
+                  disabled={!canPredict}
+                  className="w-full px-2 py-1.5 rounded text-[10px] bg-sky-500/10 text-sky-400 border border-sky-500/20 hover:bg-sky-500/20 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1"
+                  data-tooltip={predictTooltip}
+                >
+                  {predictingBehavior ? <><Loader2 size={10} className="animate-spin" /> Predicting...</> : "Predict Actions"}
+                </button>
+              </>);
+            })()}
           </div>
           {learnedPatterns.length > 0 && (
             <div className="mt-2 space-y-1.5">
