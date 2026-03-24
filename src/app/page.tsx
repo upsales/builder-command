@@ -3546,7 +3546,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                       }
                       return channelItems.map((item, idx) => (
                         <div key={item.id} className="relative">
-                          {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
+                          {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
                           <SlackMessage
                             item={item}
                             onDismiss={onDismiss}
@@ -3626,7 +3626,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                           <CollapsibleGroup key={subGroup} label={subGroup} count={subItems.length} mono={githubGroupBy2 === "repo"} defaultOpen stickyOffset={3}>
                             {subItems.map((item) => (
                               <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 relative ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
-                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
+                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
                                 <GithubCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
                               </div>
                             ))}
@@ -3634,7 +3634,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                         ))}</div>);
                       })() : groupItems.map((item) => (
                         <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 relative ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
-                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
+                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
                           <GithubCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} repoStatus={repoStatuses[(item.raw_data ? JSON.parse(item.raw_data) : {}).repo]} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
                         </div>
                       ))}
@@ -3690,7 +3690,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                           <CollapsibleGroup key={subGroup} label={subGroup} count={subItems.length} defaultOpen stickyOffset={3}>
                             {subItems.map((item) => (
                               <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 relative ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
-                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
+                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
                                 <LinearCard item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
                               </div>
                             ))}
@@ -3698,7 +3698,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
                         ))}</div>);
                       })() : groupItems.map((item) => (
                         <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 relative ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
-                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
+                                {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
                           <LinearCard item={item} states={linearStates} members={linearMembers} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} onUpdateItem={onUpdateItem} hiddenStates={hiddenStates} isInProgress={focusedKeys.has(`${item.source}:${item.source_id}`)} onToggleInProgress={() => toggleFocus(item)} onCreateTask={createTaskFromItem} agentTasks={itemAgentTasks.get(`${item.source}:${item.source_id}`)?.map(t => ({ text: t.text, status: agentSessions[t.id]?.status ?? "unknown" }))} />
                         </div>
                       ))}
@@ -3715,7 +3715,7 @@ function ItemList({ items, setItems, onDismiss, dailyTodos, onRefreshTodos, onCh
               <div className="space-y-1 ml-3 border-l border-border/30 pl-2">
                 {clankerItems.map((item) => (
                   <div key={item.id} id={`item-${item.source}-${item.source_id}`} className={`transition-all duration-300 relative ${isItemFadingOut(item) ? "opacity-0 scale-95 -translate-x-2" : ""}`}>
-                    {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2 z-10"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
+                    {predictionMap.has(`${item.source}:${item.source_id}`) && <div className="absolute -top-1 right-2"><PredictionBadge prediction={predictionMap.get(`${item.source}:${item.source_id}`)} /></div>}
                     <ClankerCard item={item} onDismiss={onDismiss} onChatAbout={chatAboutItem(item)} onAgentAction={agentActionForItem(item)} onCreateTaskAction={createTaskActionForItem(item)} />
                   </div>
                 ))}
